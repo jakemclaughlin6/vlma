@@ -221,36 +221,18 @@ int main(int argc, char *argv[])
     auto itlow2 = pointclouds2.lower_bound(timestamp_map2);
     if (itlow1 != pointclouds1.end() && itlow2 != pointclouds2.end())
     {
-      auto pointcloud_map1 = itlow1->second;
-      // pcl::PointCloud<pcl::PointXYZRGB> cloud1_xyzrgb;
-      // pcl::copyPointCloud(*itlow1->second, cloud1_xyzrgb);
-      // for (size_t i = 0; i < cloud1_xyzrgb.points.size(); i++)
-      // {
-      //   cloud1_xyzrgb.points[i].r = 0;
-      //   cloud1_xyzrgb.points[i].g = 0;
-      //   cloud1_xyzrgb.points[i].b = 255;
-      // }
-      auto pointcloud_map2 = itlow2->second;
-      // pcl::PointCloud<pcl::PointXYZRGB> cloud2_xyzrgb;
-      // pcl::copyPointCloud(*itlow2->second, cloud2_xyzrgb);
-      // for (size_t i = 0; i < cloud2_xyzrgb.points.size(); i++)
-      // {
-      //   cloud2_xyzrgb.points[i].r = 255;
-      //   cloud2_xyzrgb.points[i].g = 0;
-      //   cloud2_xyzrgb.points[i].b = 0;
-      // }
-      // pcl::PointCloud<pcl::PointXYZRGB> combined_cloud;
-      // combined_cloud += cloud1_xyzrgb;
-      // combined_cloud += cloud2_xyzrgb;
-
+      // todo: use GICP or LOAM
       // perform scan registration on cloud
-      scan_registration.SetRef(pointcloud_map1);
-      scan_registration.SetTarget(pointcloud_map2);
+      scan_registration.SetRef(itlow1->second);
+      scan_registration.SetTarget(itlow2->second);
       scan_registration.Match();
       auto T_map1_map2 = scan_registration.GetResult().inverse().matrix();
-
       // apply estimate to map2
-      // compute ICP fitness score of map1-map2
+      pcl::PointCloud<pcl::PointXYZ>::Ptr map2_in_map1(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::transformPointCloud(
+            map2_filtered, *map2_in_map1, T_map1_map2);
+      // compute ICP fitness score of map1-map2 without running any cycles
     }
   }
 

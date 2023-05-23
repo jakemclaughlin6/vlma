@@ -11,6 +11,8 @@
 #include <beam_matching/IcpMatcher.h>
 #include <beam_utils/utils.h>
 
+#include <beam_filtering/VoxelDownsample.h>
+
 #include <gflags/gflags.h>
 #include <boost/progress.hpp>
 
@@ -67,35 +69,28 @@ int main(int argc, char *argv[])
   // storage variables
   std::map<double, pcl::PointCloud<pcl::PointXYZ>::Ptr> pointclouds1;
   std::map<double, pcl::PointCloud<pcl::PointXYZ>::Ptr> pointclouds2;
-  std::map<double, double> matched_stamps;               // visual matches from map1 to map2
-  std::map<double, Eigen::Matrix4d> relative_trajectory; // map of relative poses from map 2 to map 1
-  std::map<double, cv::Mat> images_map1;
+  std::map<double, double> matched_stamps; // visual matches from map2 to map1
+  pcl::PointCloud<pcl::PointXYZ> map1;
+  pcl::PointCloud<pcl::PointXYZ> map2;
 
   // matchings variables
   beam_cv::ImageDatabase image_db;
-  beam_matching::IcpMatcher::Params matcher_params;
-  beam_matching::IcpMatcher scan_registration(matcher_params);
 
-  /*
-    Process bag 1
-  */
   BEAM_INFO("Processing {}", bag_file1);
-
   rosbag::Bag bag1;
   bag1.open(bag_file1);
   rosbag::View bag1_view(bag1, rosbag::TopicQuery(topics1));
-
   boost::progress_display loading_bar_bag1(bag1_view.size());
-
   ros::Time prev_frame_time(0.0);
   for (rosbag::MessageInstance const m : bag1_view)
   {
+    ++loading_bar_bag1;
+
     // add lidar scan to storage
     sensor_msgs::PointCloud2::Ptr scan =
         m.instantiate<sensor_msgs::PointCloud2>();
     if (scan)
     {
-      ++loading_bar_bag1;
       // convert to pcl
       pcl::PCLPointCloud2 pcl_pc2;
       beam::pcl_conversions::toPCL(*scan, pcl_pc2);
@@ -113,6 +108,7 @@ int main(int argc, char *argv[])
             *scan_in_lidar_frame, *scan_in_world_frame, T_WORLD_LIDAR);
         // store
         pointclouds1[scan->header.stamp.toSec()] = scan_in_world_frame;
+        map1 += *scan_in_world_frame;
       }
     }
 
@@ -120,15 +116,13 @@ int main(int argc, char *argv[])
     sensor_msgs::Image::Ptr buffer_image = m.instantiate<sensor_msgs::Image>();
     if (buffer_image)
     {
-      ++loading_bar_bag1;
       ros::Time stamp = buffer_image->header.stamp;
-      // add at 5 hz
+      // add at 2 hz
       if (stamp - prev_frame_time >= ros::Duration(0.5))
       {
+        prev_frame_time = stamp;
         cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
         image_db.AddImage(image, stamp);
-        // images_map1[stamp.toSec()] = image;
-        prev_frame_time = stamp;
       }
     }
   }
@@ -137,23 +131,20 @@ int main(int argc, char *argv[])
     Process bag 2
   */
   BEAM_INFO("Processing {}", bag_file2);
-
   rosbag::Bag bag2;
   bag2.open(bag_file2);
-  rosbag::View bag2_view(bag1, rosbag::TopicQuery(topics2));
-
+  rosbag::View bag2_view(bag2, rosbag::TopicQuery(topics2));
   boost::progress_display loading_bar_bag2(bag2_view.size());
-
   prev_frame_time = ros::Time(0.0);
   for (rosbag::MessageInstance const m : bag2_view)
   {
+    ++loading_bar_bag2;
+
     // add lidar scan to storage
     sensor_msgs::PointCloud2::Ptr scan =
         m.instantiate<sensor_msgs::PointCloud2>();
-
     if (scan)
     {
-      ++loading_bar_bag2;
       // convert to pcl
       pcl::PCLPointCloud2 pcl_pc2;
       beam::pcl_conversions::toPCL(*scan, pcl_pc2);
@@ -170,6 +161,7 @@ int main(int argc, char *argv[])
             *scan_in_lidar_frame, *scan_in_world_frame, T_WORLD_LIDAR);
         // store
         pointclouds2[scan->header.stamp.toSec()] = scan_in_world_frame;
+        map2 += *scan_in_world_frame;
       }
     }
 
@@ -177,19 +169,14 @@ int main(int argc, char *argv[])
     sensor_msgs::Image::Ptr buffer_image = m.instantiate<sensor_msgs::Image>();
     if (buffer_image)
     {
-      ++loading_bar_bag2;
-      // reduce rate
-      // query image database for a match
-      // store a timestamp to timestamp map
       ros::Time stamp = buffer_image->header.stamp;
       if (stamp - prev_frame_time >= ros::Duration(0.2))
       {
-        cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
         prev_frame_time = stamp;
-
-        auto results = image_db.QueryDatabase(image, 3);
+        cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
+        const auto results = image_db.QueryDatabase(image, 1);
         // require matches
-        if (results.size() < 2)
+        if (results.size() < 1)
         {
           continue;
         }
@@ -198,48 +185,74 @@ int main(int argc, char *argv[])
         if (timestamp.has_value() && score > 0.10)
         {
           matched_stamps[stamp.toSec()] = timestamp.value().toSec();
-          // auto matching_image = images_map1[timestamp.value().toSec()];
-          // cv::Mat H;
-          // cv::hconcat(image, matching_image, H);
-          // std::string image_filename = std::to_string(stamp.toNSec()) + "_" + std::to_string(score) + ".png";
-          // cv::imwrite("/userhome/data/image_matches/" + image_filename, H);
         }
       }
     }
   }
 
-  BEAM_INFO("Performing scan registration");
-  // perform scan registration between matches
-  for (const auto &[timestamp_map1, timestamp_map2] : matched_stamps)
+  Eigen::Vector3f scan_voxel_size(.5, .5, .5);
+  beam_filtering::VoxelDownsample<> downsampler(scan_voxel_size);
+
+  BEAM_INFO("Filtering map 1");
+  downsampler.SetInputCloud(std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(map1));
+  downsampler.Filter();
+  auto map1_filtered = downsampler.GetFilteredCloud();
+  beam::SavePointCloud("/userhome/data/clouds/map1.pcd", map1_filtered);
+
+  BEAM_INFO("Filtering map 2");
+  downsampler.SetInputCloud(std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(map2));
+  downsampler.Filter();
+  auto map2_filtered = downsampler.GetFilteredCloud();
+  beam::SavePointCloud("/userhome/data/clouds/map2.pcd", map2_filtered);
+
+  BEAM_INFO("Performing RANSAC scan registration");
+  beam_matching::IcpMatcher::Params matcher_params;
+  beam_matching::IcpMatcher scan_registration(matcher_params);
+  std::vector<std::pair<double, double>> matched_stamps_vec;
+  std::transform(matched_stamps.begin(), matched_stamps.end(), matched_stamps_vec.begin(), [&](const auto &pair)
+                 { return pair; });
+  int num_matches = matched_stamps_vec.size();
+  Eigen::Matrix4d T_map1_map2_best;
+  for (int i = 0; i < 50; i++)
   {
+    int random_index = beam::randi(0, num_matches);
+    const auto [timestamp_map2, timestamp_map1] = matched_stamps_vec[random_index];
     auto itlow1 = pointclouds1.lower_bound(timestamp_map1);
     auto itlow2 = pointclouds2.lower_bound(timestamp_map2);
     if (itlow1 != pointclouds1.end() && itlow2 != pointclouds2.end())
     {
-      std::cout << timestamp_map1 << " : " << timestamp_map2 << std::endl;
       auto pointcloud_map1 = itlow1->second;
+      // pcl::PointCloud<pcl::PointXYZRGB> cloud1_xyzrgb;
+      // pcl::copyPointCloud(*itlow1->second, cloud1_xyzrgb);
+      // for (size_t i = 0; i < cloud1_xyzrgb.points.size(); i++)
+      // {
+      //   cloud1_xyzrgb.points[i].r = 0;
+      //   cloud1_xyzrgb.points[i].g = 0;
+      //   cloud1_xyzrgb.points[i].b = 255;
+      // }
       auto pointcloud_map2 = itlow2->second;
+      // pcl::PointCloud<pcl::PointXYZRGB> cloud2_xyzrgb;
+      // pcl::copyPointCloud(*itlow2->second, cloud2_xyzrgb);
+      // for (size_t i = 0; i < cloud2_xyzrgb.points.size(); i++)
+      // {
+      //   cloud2_xyzrgb.points[i].r = 255;
+      //   cloud2_xyzrgb.points[i].g = 0;
+      //   cloud2_xyzrgb.points[i].b = 0;
+      // }
+      // pcl::PointCloud<pcl::PointXYZRGB> combined_cloud;
+      // combined_cloud += cloud1_xyzrgb;
+      // combined_cloud += cloud2_xyzrgb;
 
-      pcl::PointCloud<pcl::PointXYZ> combined_cloud;
+      // perform scan registration on cloud
+      scan_registration.SetRef(pointcloud_map1);
+      scan_registration.SetTarget(pointcloud_map2);
+      scan_registration.Match();
+      auto T_map1_map2 = scan_registration.GetResult().inverse().matrix();
 
-      combined_cloud += *pointcloud_map1;
-      combined_cloud += *pointcloud_map2;
-
-      std::string filename = std::to_string(itlow1->first) + ".pcd";
-      auto success = beam::SavePointCloud("/userhome/data/clouds/" + filename, combined_cloud);
-      std::cout << success << std::endl;
-      // // scan registration between them
-      // scan_registration.SetRef(pointcloud_map1);
-      // scan_registration.SetTarget(pointcloud_map2);
-      // scan_registration.Match();
-      // // estimate info, don't use if its not high enough
-      // auto T_map1_map2 = scan_registration.GetResult().inverse().matrix();
-      // relative_trajectory[timestamp_map2] = T_map1_map2;
+      // apply estimate to map2
+      // compute ICP fitness score of map1-map2
     }
   }
-
-  // for each timestamp in trajectory 2, interpolate its relative pose from the relative trajectory
-  // apply the pose to the pose in trajectory 2 and output a new trajectory file
 
   return 0;
 }

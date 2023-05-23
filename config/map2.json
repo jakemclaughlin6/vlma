@@ -1,5 +1,5 @@
 {
-  "bag_file": "/home/jake/data/2021_10_27_16_21_54_ConestogoBridge/raw.bag",
+  "bag_file": "/home/jake/data/2021_10_27_16_21_54_ConestogoBridge/output.bag",
   "trajectory_file": "/home/jake/data/2021_10_27_16_21_54_ConestogoBridge/2021_10_27_16_21_54.json",
   "lidar_frame_id": "lidar_h_link",
   "image_topic": "/F1/image_raw",

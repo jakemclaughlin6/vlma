@@ -8,13 +8,14 @@
 #include <beam_cv/ImageDatabase.h>
 #include <beam_cv/Utils.h>
 #include <beam_mapping/Poses.h>
-#include <beam_matching/IcpMatcher.h>
+#include <beam_matching/GicpMatcher.h>
 #include <beam_utils/utils.h>
-
 #include <beam_filtering/VoxelDownsample.h>
 
 #include <gflags/gflags.h>
 #include <boost/progress.hpp>
+
+constexpr int RANSAC_ITERATIONS = 50;
 
 DEFINE_string(map1_config_file, "", "Full path to config file to load (Required).");
 DEFINE_validator(map1_config_file, &beam::gflags::ValidateFileMustExist);
@@ -69,7 +70,7 @@ int main(int argc, char *argv[])
   // storage variables
   std::map<double, pcl::PointCloud<pcl::PointXYZ>::Ptr> pointclouds1;
   std::map<double, pcl::PointCloud<pcl::PointXYZ>::Ptr> pointclouds2;
-  std::map<double, double> matched_stamps; // visual matches from map2 to map1
+  std::vector<std::pair<double, double>> matched_stamps; // visual matches from map2 to map1
   pcl::PointCloud<pcl::PointXYZ> map1;
   pcl::PointCloud<pcl::PointXYZ> map2;
 
@@ -184,7 +185,8 @@ int main(int argc, char *argv[])
         const auto score = results[0].Score;
         if (timestamp.has_value() && score > 0.10)
         {
-          matched_stamps[stamp.toSec()] = timestamp.value().toSec();
+          auto match = std::make_pair(stamp.toSec(), timestamp.value().toSec());
+          matched_stamps.push_back(match);
         }
       }
     }
@@ -206,33 +208,73 @@ int main(int argc, char *argv[])
   beam::SavePointCloud("/userhome/data/clouds/map2.pcd", map2_filtered);
 
   BEAM_INFO("Performing RANSAC scan registration");
-  beam_matching::IcpMatcher::Params matcher_params;
-  beam_matching::IcpMatcher scan_registration(matcher_params);
-  std::vector<std::pair<double, double>> matched_stamps_vec;
-  std::transform(matched_stamps.begin(), matched_stamps.end(), matched_stamps_vec.begin(), [&](const auto &pair)
-                 { return pair; });
-  int num_matches = matched_stamps_vec.size();
+  beam_matching::GicpMatcher::Params matcher_params;
+  matcher_params.max_iter = 50;
+  beam_matching::GicpMatcher scan_registration(matcher_params);
+
+  beam_matching::GicpMatcher::Params map_score_params;
+  map_score_params.max_iter = 1;
+  beam_matching::GicpMatcher map_scoring(map_score_params);
+
+  const int N = matched_stamps.size() - 1;
   Eigen::Matrix4d T_map1_map2_best;
-  for (int i = 0; i < 50; i++)
+  for (int i = 0; i < RANSAC_ITERATIONS; i++)
   {
-    int random_index = beam::randi(0, num_matches);
-    const auto [timestamp_map2, timestamp_map1] = matched_stamps_vec[random_index];
+    int random_index = beam::randi(N, 0);
+    const auto [timestamp_map2, timestamp_map1] = matched_stamps[random_index];
     auto itlow1 = pointclouds1.lower_bound(timestamp_map1);
     auto itlow2 = pointclouds2.lower_bound(timestamp_map2);
     if (itlow1 != pointclouds1.end() && itlow2 != pointclouds2.end())
     {
-      // todo: use GICP or LOAM
+      pcl::PointCloud<pcl::PointXYZRGB> cloud1_xyzrgb;
+      pcl::copyPointCloud(*itlow1->second, cloud1_xyzrgb);
+      for (size_t i = 0; i < cloud1_xyzrgb.points.size(); i++)
+      {
+        cloud1_xyzrgb.points[i].r = 0;
+        cloud1_xyzrgb.points[i].g = 0;
+        cloud1_xyzrgb.points[i].b = 255;
+      }
+
+      pcl::PointCloud<pcl::PointXYZRGB> cloud2_xyzrgb;
+      pcl::copyPointCloud(*itlow2->second, cloud2_xyzrgb);
+      for (size_t i = 0; i < cloud2_xyzrgb.points.size(); i++)
+      {
+        cloud2_xyzrgb.points[i].r = 255;
+        cloud2_xyzrgb.points[i].g = 0;
+        cloud2_xyzrgb.points[i].b = 0;
+      }
+      pcl::PointCloud<pcl::PointXYZRGB> combined_cloud;
+      combined_cloud += cloud1_xyzrgb;
+      combined_cloud += cloud2_xyzrgb;
+      std::string filename = std::to_string(random_index) + ".pcd";
+      auto success = beam::SavePointCloud("/userhome/data/clouds/" + filename, combined_cloud);
+
+      // todo: maybe use loam for single scan registration, gicp for map scoring?
       // perform scan registration on cloud
       scan_registration.SetRef(itlow1->second);
       scan_registration.SetTarget(itlow2->second);
-      scan_registration.Match();
+      bool converged = scan_registration.Match();
       auto T_map1_map2 = scan_registration.GetResult().inverse().matrix();
+
+      std::cout << std::fixed;
+      std::cout << "\nIteration: " << i << std::endl;
+      std::cout << "Index: " << random_index << std::endl;
+      std::cout << "Timestamp match: [" << timestamp_map2 << " : " << timestamp_map1 << "]" << std::endl;
+      std::cout << "GICP Converged: " << converged << std::endl;
+      std::cout << "Result: \n"
+                << T_map1_map2 << std::endl;
+
       // apply estimate to map2
       pcl::PointCloud<pcl::PointXYZ>::Ptr map2_in_map1(
-            new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::transformPointCloud(
-            map2_filtered, *map2_in_map1, T_map1_map2);
-      // compute ICP fitness score of map1-map2 without running any cycles
+          new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::transformPointCloud(
+          map2_filtered, *map2_in_map1, T_map1_map2);
+      // compute GICP fitness score of map1-map2 without running any cycles
+      map_scoring.SetRef(std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(map1_filtered));
+      map_scoring.SetTarget(map2_in_map1);
+      map_scoring.Match();
+      auto score = map_scoring.GetFitnessScore();
+      std::cout << "Total fitness score: " << score << std::endl;
     }
   }
 

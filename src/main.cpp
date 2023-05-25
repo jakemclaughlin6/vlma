@@ -249,7 +249,6 @@ int main(int argc, char *argv[])
       std::string filename = std::to_string(random_index) + ".pcd";
       auto success = beam::SavePointCloud("/userhome/data/clouds/" + filename, combined_cloud);
 
-      // todo: maybe use loam for single scan registration, gicp for map scoring?
       // perform scan registration on cloud
       scan_registration.SetRef(itlow1->second);
       scan_registration.SetTarget(itlow2->second);
@@ -269,6 +268,7 @@ int main(int argc, char *argv[])
           new pcl::PointCloud<pcl::PointXYZ>);
       pcl::transformPointCloud(
           map2_filtered, *map2_in_map1, T_map1_map2);
+          
       // compute GICP fitness score of map1-map2 without running any cycles
       map_scoring.SetRef(std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(map1_filtered));
       map_scoring.SetTarget(map2_in_map1);

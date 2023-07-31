@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.14)
 project(vl_traj_alignment)
 
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 14)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
 
 find_package(Eigen3 3.3.7 REQUIRED)
@@ -58,6 +58,9 @@ catkin_package(
 add_library(
   ${PROJECT_NAME}
   src/pose_lookup.cpp
+  src/Frame.cpp       
+  src/LinK3D_Extractor.cpp 
+  src/BoW3D.cpp 
 )
 
 include_directories(

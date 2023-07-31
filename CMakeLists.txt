@@ -58,9 +58,6 @@ catkin_package(
 add_library(
   ${PROJECT_NAME}
   src/pose_lookup.cpp
-  src/Frame.cpp       
-  src/LinK3D_Extractor.cpp 
-  src/BoW3D.cpp 
 )
 
 include_directories(

@@ -16,9 +16,6 @@
 #include <beam_cv/detectors/Detectors.h>
 #include <beam_cv/trackers/Trackers.h>
 
-#include <vl_traj_alignment/LinK3D_Extractor.h>
-#include <vl_traj_alignment/BoW3D.h>
-
 #include <boost/progress.hpp>
 #include <gflags/gflags.h>
 
@@ -87,9 +84,10 @@ int main(int argc, char *argv[]) {
 
   auto detector = std::make_shared<beam_cv::FASTSSCDetector>(200);
   beam_cv::KLTracker::Params tracker_params;
-  auto tracker = std::make_shared<beam_cv::KLTracker>(tracker_params, detector, nullptr, 500);
+  auto tracker = std::make_shared<beam_cv::KLTracker>(tracker_params, detector,
+                                                      nullptr, 500);
 
-  // matchings variables
+  // image database
   beam_cv::ImageDatabase image_db;
 
   BEAM_INFO("Processing {}", bag_file1);
@@ -192,13 +190,14 @@ int main(int argc, char *argv[]) {
   //   }
 
   //   // add image to database
-  //   sensor_msgs::Image::Ptr buffer_image = m.instantiate<sensor_msgs::Image>();
-  //   if (buffer_image) {
+  //   sensor_msgs::Image::Ptr buffer_image =
+  //   m.instantiate<sensor_msgs::Image>(); if (buffer_image) {
   //     ros::Time stamp = buffer_image->header.stamp;
   //     if (stamp - prev_frame_time >= ros::Duration(0.2)) {
   //       prev_frame_time = stamp;
-  //       cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
-  //       const auto results = image_db.QueryDatabase(image, 1);
+  //       cv::Mat image =
+  //       beam_cv::OpenCVConversions::RosImgToMat(*buffer_image); const auto
+  //       results = image_db.QueryDatabase(image, 1);
   //       // require matches
   //       if (results.size() < 1) {
   //         continue;
@@ -206,8 +205,8 @@ int main(int argc, char *argv[]) {
   //       auto timestamp = image_db.GetImageTimestamp(results[0].Id);
   //       const auto score = results[0].Score;
   //       if (timestamp.has_value() && score > 0.10) {
-  //         auto match = std::make_pair(stamp.toSec(), timestamp.value().toSec());
-  //         matched_stamps.push_back(match);
+  //         auto match = std::make_pair(stamp.toSec(),
+  //         timestamp.value().toSec()); matched_stamps.push_back(match);
   //       }
   //     }
   //   }

@@ -58,6 +58,7 @@ catkin_package(
 add_library(
   ${PROJECT_NAME}
   src/pose_lookup.cpp
+  src/Scancontext.cpp
 )
 
 include_directories(

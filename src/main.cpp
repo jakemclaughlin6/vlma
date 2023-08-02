@@ -8,13 +8,20 @@
 #include <beam_mapping/Poses.h>
 #include <beam_matching/GicpMatcher.h>
 #include <beam_utils/utils.h>
+#include <pcl/common/centroid.h>
 
 // DONT CHANGE INCLUDE ORDER
+#include <beam_calibration/CameraModel.h>
 #include <beam_cv/ImageDatabase.h>
 #include <beam_cv/OpenCVConversions.h>
 #include <beam_cv/Utils.h>
+#include <beam_cv/descriptors/Descriptors.h>
 #include <beam_cv/detectors/Detectors.h>
+#include <beam_cv/geometry/RelativePoseEstimator.h>
+#include <beam_cv/matchers/Matchers.h>
 #include <beam_cv/trackers/Trackers.h>
+
+#include <vl_traj_alignment/scancontext/Scancontext.h>
 
 #include <boost/progress.hpp>
 #include <gflags/gflags.h>
@@ -29,6 +36,77 @@ DEFINE_string(map2_config_file, "",
               "Full path to config file to load (Required).");
 DEFINE_validator(map2_config_file, &beam::gflags::ValidateFileMustExist);
 
+DEFINE_double(alignment_alpha, 1.0,
+              "Amount ot align map2 to map1 (1.0 align map2 completely to "
+              "map1, 0.0 align map1 completely to map2)");
+
+DEFINE_bool(offset_map2, false,
+            "Whether to offset the second map trajectory (for testing)");
+
+namespace vl_traj_alignment {
+class Map {
+public:
+  Map(const std::string &json_path, bool offset_poses,
+      const std::string &world_frame) {
+    nlohmann::json J_map;
+    beam::ReadJson(json_path, J_map);
+
+    bag_file = J_map["bag_file"];
+    std::string cam_file = J_map["camera_intrinsics_file"];
+    cam_model = beam_calibration::CameraModel::Create(cam_file);
+    std::string trajectory_file = J_map["trajectory_file"];
+    beam_mapping::Poses trajectory;
+    trajectory.LoadFromJSON(trajectory_file);
+
+    // offset the trajectory if desired
+    if (offset_poses) {
+      Eigen::Matrix4d random_offset = beam::GenerateRandomPose(1.0, 10.0);
+      auto traj_poses = trajectory.GetPoses();
+      std::vector<Eigen::Matrix4d, beam::AlignMat4d> offset_poses;
+      for (const auto pose : traj_poses) {
+        offset_poses.push_back(pose * random_offset);
+      }
+      trajectory.SetPoses(offset_poses);
+    }
+
+    std::string lidar_frame = J_map["lidar_frame_id"];
+    vl_traj_alignment::PoseLookup traj_lookup_tmp(trajectory, lidar_frame,
+                                                  world_frame);
+    trajectory_lookup = traj_lookup_tmp;
+    topics.push_back(J_map["image_topic"]);
+    topics.push_back(J_map["lidar_topic"]);
+  }
+
+  void AddPointCloud(const sensor_msgs::PointCloud2::Ptr &scan) {
+    // convert to pcl
+    pcl::PCLPointCloud2 pcl_pc2;
+    beam::pcl_conversions::toPCL(*scan, pcl_pc2);
+    pcl::PointCloud<pcl::PointXYZI>::Ptr scan_in_lidar_frame(
+        new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::fromPCLPointCloud2(pcl_pc2, *scan_in_lidar_frame);
+
+    // transform into world frame
+    Eigen::Matrix4d T_WORLD_LIDAR;
+    if (trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR,
+                                            scan->header.stamp)) {
+      pcl::PointCloud<pcl::PointXYZI>::Ptr scan_in_world_frame(
+          new pcl::PointCloud<pcl::PointXYZI>);
+      pcl::transformPointCloud(*scan_in_lidar_frame, *scan_in_world_frame,
+                               T_WORLD_LIDAR);
+      // store
+      pointclouds[scan->header.stamp.toSec()] = scan_in_world_frame;
+    }
+    return;
+  }
+
+  vl_traj_alignment::PoseLookup trajectory_lookup;
+  std::shared_ptr<beam_calibration::CameraModel> cam_model;
+  std::map<double, pcl::PointCloud<pcl::PointXYZI>::Ptr> pointclouds;
+  std::string bag_file;
+  std::vector<std::string> topics;
+};
+} // namespace vl_traj_alignment
+
 int main(int argc, char *argv[]) {
   // Load config file
   gflags::ParseCommandLineFlags(&argc, &argv, true);
@@ -41,48 +119,25 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
-  nlohmann::json J_map1;
-  beam::ReadJson(FLAGS_map1_config_file, J_map1);
-
-  nlohmann::json J_map2;
-  beam::ReadJson(FLAGS_map2_config_file, J_map2);
-
-  // Open bag and get its info
-  std::string bag_file1 = J_map1["bag_file"];
-  std::string bag_file2 = J_map2["bag_file"];
-  std::vector<std::string> topics1{J_map1["image_topic"],
-                                   J_map1["lidar_topic"]};
-  std::vector<std::string> topics2{J_map2["image_topic"],
-                                   J_map2["lidar_topic"]};
-
-  // fixed frame in both trajectory files (must match)
-  std::string world_frame = "world";
-
-  // load trajectory from map 1
-  std::string trajectory_file1 = J_map1["trajectory_file"];
-  beam_mapping::Poses trajectory1;
-  trajectory1.LoadFromJSON(trajectory_file1);
-  std::string lidar_frame_id1 = J_map1["lidar_frame_id"];
-  vl_traj_alignment::PoseLookup trajectory1_lookup(trajectory1, lidar_frame_id1,
-                                                   world_frame);
-
-  // load trajectory from map 2
-  std::string trajectory_file2 = J_map2["trajectory_file"];
-  beam_mapping::Poses trajectory2;
-  trajectory2.LoadFromJSON(trajectory_file2);
-  std::string lidar_frame_id2 = J_map2["lidar_frame_id"];
-  vl_traj_alignment::PoseLookup trajectory2_lookup(trajectory2, lidar_frame_id2,
-                                                   world_frame);
+  // load each map object
+  vl_traj_alignment::Map map1(FLAGS_map1_config_file, false, "world");
+  vl_traj_alignment::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2,
+                              "world");
 
   // storage variables
-  std::map<double, pcl::PointCloud<pcl::PointXYZ>::Ptr> pointclouds1;
-  std::map<double, pcl::PointCloud<pcl::PointXYZ>::Ptr> pointclouds2;
   std::vector<std::pair<double, double>>
       matched_stamps; // visual matches from map2 to map1
-  pcl::PointCloud<pcl::PointXYZ> map1;
-  pcl::PointCloud<pcl::PointXYZ> map2;
+  std::map<double, Eigen::Matrix4d>
+      visual_relative_poses; // <map1 stamp: T_map2_map1>
 
-  auto detector = std::make_shared<beam_cv::FASTSSCDetector>(200);
+  // store the images that are in the database
+  std::map<double, cv::Mat> db_images;
+
+  // visual feature detector, desciptor, matcher and tracker
+  auto detector = std::make_shared<beam_cv::ORBDetector>(200);
+  auto descriptor = std::make_shared<beam_cv::ORBDescriptor>();
+  auto matcher = std::make_shared<beam_cv::BFMatcher>(cv::NORM_HAMMING, false,
+                                                      false, 0.8, 5, true);
   beam_cv::KLTracker::Params tracker_params;
   auto tracker = std::make_shared<beam_cv::KLTracker>(tracker_params, detector,
                                                       nullptr, 500);
@@ -90,42 +145,27 @@ int main(int argc, char *argv[]) {
   // image database
   beam_cv::ImageDatabase image_db;
 
-  BEAM_INFO("Processing {}", bag_file1);
+  /*************************************
+                Process bag 1
+  **************************************/
+  BEAM_INFO("Processing {}", map1.bag_file);
   rosbag::Bag bag1;
-  bag1.open(bag_file1);
-  rosbag::View bag1_view(bag1, rosbag::TopicQuery(topics1));
+  bag1.open(map1.bag_file);
+  rosbag::View bag1_view(bag1, rosbag::TopicQuery(map1.topics));
   boost::progress_display loading_bar_bag1(bag1_view.size());
   ros::Time prev_frame_time(0.0);
   for (rosbag::MessageInstance const m : bag1_view) {
     ++loading_bar_bag1;
 
     // add lidar scan to storage
-    sensor_msgs::PointCloud2::Ptr scan =
-        m.instantiate<sensor_msgs::PointCloud2>();
+    auto scan = m.instantiate<sensor_msgs::PointCloud2>();
     if (scan) {
-      // convert to pcl
-      pcl::PCLPointCloud2 pcl_pc2;
-      beam::pcl_conversions::toPCL(*scan, pcl_pc2);
-      pcl::PointCloud<pcl::PointXYZ>::Ptr scan_in_lidar_frame(
-          new pcl::PointCloud<pcl::PointXYZ>);
-      pcl::fromPCLPointCloud2(pcl_pc2, *scan_in_lidar_frame);
-
-      // transform into world frame
-      Eigen::Matrix4d T_WORLD_LIDAR;
-      if (trajectory1_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR,
-                                               scan->header.stamp)) {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr scan_in_world_frame(
-            new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::transformPointCloud(*scan_in_lidar_frame, *scan_in_world_frame,
-                                 T_WORLD_LIDAR);
-        // store
-        pointclouds1[scan->header.stamp.toSec()] = scan_in_world_frame;
-        map1 += *scan_in_world_frame;
-      }
+      map1.AddPointCloud(scan);
+      continue;
     }
 
     // add image to database if we've detected a keyframe
-    sensor_msgs::Image::Ptr buffer_image = m.instantiate<sensor_msgs::Image>();
+    auto buffer_image = m.instantiate<sensor_msgs::Image>();
     if (buffer_image) {
       ros::Time stamp = buffer_image->header.stamp;
       cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
@@ -133,6 +173,7 @@ int main(int argc, char *argv[]) {
       if (prev_frame_time == ros::Time(0.0)) {
         prev_frame_time = stamp;
         image_db.AddImage(image, stamp);
+        db_images[stamp.toSec()] = image;
       } else {
         auto prev_ids = tracker->GetLandmarkIDsInImage(prev_frame_time);
         size_t total_lms = prev_ids.size();
@@ -148,150 +189,253 @@ int main(int argc, char *argv[]) {
         if (percent_tracked <= 0.6) {
           prev_frame_time = stamp;
           image_db.AddImage(image, stamp);
+          db_images[stamp.toSec()] = image;
         }
       }
     }
   }
 
-  // /*
-  //   Process bag 2
-  // */
-  // BEAM_INFO("Processing {}", bag_file2);
-  // rosbag::Bag bag2;
-  // bag2.open(bag_file2);
-  // rosbag::View bag2_view(bag2, rosbag::TopicQuery(topics2));
-  // boost::progress_display loading_bar_bag2(bag2_view.size());
-  // prev_frame_time = ros::Time(0.0);
-  // for (rosbag::MessageInstance const m : bag2_view) {
-  //   ++loading_bar_bag2;
+  /*************************************
+                Process bag 2
+  **************************************/
+  BEAM_INFO("Processing {}", map2.bag_file);
+  rosbag::Bag bag2;
+  bag2.open(map2.bag_file);
+  rosbag::View bag2_view(bag2, rosbag::TopicQuery(map2.topics));
+  boost::progress_display loading_bar_bag2(bag2_view.size());
+  prev_frame_time = ros::Time(0.0);
+  for (rosbag::MessageInstance const m : bag2_view) {
+    ++loading_bar_bag2;
 
-  //   // add lidar scan to storage
-  //   sensor_msgs::PointCloud2::Ptr scan =
-  //       m.instantiate<sensor_msgs::PointCloud2>();
-  //   if (scan) {
-  //     // convert to pcl
-  //     pcl::PCLPointCloud2 pcl_pc2;
-  //     beam::pcl_conversions::toPCL(*scan, pcl_pc2);
-  //     pcl::PointCloud<pcl::PointXYZ>::Ptr scan_in_lidar_frame(
-  //         new pcl::PointCloud<pcl::PointXYZ>);
-  //     pcl::fromPCLPointCloud2(pcl_pc2, *scan_in_lidar_frame);
-  //     // transform into world frame
-  //     Eigen::Matrix4d T_WORLD_LIDAR;
-  //     if (trajectory2_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR,
-  //                                              scan->header.stamp)) {
-  //       pcl::PointCloud<pcl::PointXYZ>::Ptr scan_in_world_frame(
-  //           new pcl::PointCloud<pcl::PointXYZ>);
-  //       pcl::transformPointCloud(*scan_in_lidar_frame, *scan_in_world_frame,
-  //                                T_WORLD_LIDAR);
-  //       // store
-  //       pointclouds2[scan->header.stamp.toSec()] = scan_in_world_frame;
-  //       map2 += *scan_in_world_frame;
-  //     }
-  //   }
+    // add lidar scan to storage
+    auto scan = m.instantiate<sensor_msgs::PointCloud2>();
+    if (scan) {
+      map2.AddPointCloud(scan);
+      continue;
+    }
 
-  //   // add image to database
-  //   sensor_msgs::Image::Ptr buffer_image =
-  //   m.instantiate<sensor_msgs::Image>(); if (buffer_image) {
-  //     ros::Time stamp = buffer_image->header.stamp;
-  //     if (stamp - prev_frame_time >= ros::Duration(0.2)) {
-  //       prev_frame_time = stamp;
-  //       cv::Mat image =
-  //       beam_cv::OpenCVConversions::RosImgToMat(*buffer_image); const auto
-  //       results = image_db.QueryDatabase(image, 1);
-  //       // require matches
-  //       if (results.size() < 1) {
-  //         continue;
-  //       }
-  //       auto timestamp = image_db.GetImageTimestamp(results[0].Id);
-  //       const auto score = results[0].Score;
-  //       if (timestamp.has_value() && score > 0.10) {
-  //         auto match = std::make_pair(stamp.toSec(),
-  //         timestamp.value().toSec()); matched_stamps.push_back(match);
-  //       }
-  //     }
-  //   }
-  // }
+    // query image database to get initial matches
+    auto buffer_image = m.instantiate<sensor_msgs::Image>();
+    if (buffer_image) {
+      const auto stamp_map2 = buffer_image->header.stamp;
+      if (stamp_map2 - prev_frame_time >= ros::Duration(0.2)) {
+        prev_frame_time = stamp_map2;
+        cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
+        const auto results = image_db.QueryDatabase(image, 1);
+        // require matches
+        if (results.size() < 1) {
+          continue;
+        }
+        const auto score = results[0].Score;
+        if (!image_db.GetImageTimestamp(results[0].Id).has_value() ||
+            score < 0.01) {
+          continue;
+        }
+        const auto stamp_map1 =
+            image_db.GetImageTimestamp(results[0].Id).value();
+        // match descriptors directly
+        std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map2;
+        std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map1;
+        beam_cv::DetectComputeAndMatch(image, db_images[stamp_map1.toSec()],
+                                       descriptor, detector, matcher,
+                                       pixels_map2, pixels_map1);
+        if (pixels_map1.size() < 7) {
+          continue;
+        }
+        // compute relative pose
+        auto T_map2_map1_offset =
+            beam_cv::RelativePoseEstimator::RANSACEstimator(
+                map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
+                beam_cv::EstimatorMethod::SEVENPOINT, 100, 10.0);
+        if (!T_map2_map1_offset.has_value()) {
+          continue;
+        }
+        const int num_inliers = beam_cv::CheckInliers(
+            map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
+            Eigen::Matrix4d::Identity(), T_map2_map1_offset.value(), 10.0);
+        const float inlier_ratio =
+            (float)num_inliers / (float)pixels_map1.size();
+        if (inlier_ratio < 0.85) {
+          continue;
+        }
 
-  // Eigen::Vector3f scan_voxel_size(.5, .5, .5);
-  // beam_filtering::VoxelDownsample<> downsampler(scan_voxel_size);
+        // compute initial relative pose between maps
+        Eigen::Matrix4d T_MAP1_LIDAR, T_MAP2_LIDAR;
+        if (!map1.trajectory_lookup.GetT_WORLD_SENSOR(T_MAP1_LIDAR,
+                                                      ros::Time(stamp_map1)) ||
+            !map2.trajectory_lookup.GetT_WORLD_SENSOR(T_MAP2_LIDAR,
+                                                      stamp_map2)) {
+          continue;
+        }
+        // ignore translation component since vision can't estimate this
+        T_map2_map1_offset.value().block<3, 1>(0, 3) = Eigen::Vector3d::Zero();
+        const Eigen::Matrix4d T_map2_map1_init =
+            T_MAP2_LIDAR * beam::InvertTransform(T_MAP1_LIDAR);
+        const Eigen::Matrix4d T_map2_map1 =
+            T_map2_map1_init * T_map2_map1_offset.value();
 
-  // BEAM_INFO("Filtering map 1");
-  // downsampler.SetInputCloud(
-  //     std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(map1));
-  // downsampler.Filter();
-  // auto map1_filtered = downsampler.GetFilteredCloud();
-  // beam::SavePointCloud("/userhome/data/clouds/map1.pcd", map1_filtered);
+        // store relative poses and candidate matches
+        visual_relative_poses[stamp_map1.toSec()] = T_map2_map1;
+        matched_stamps.push_back({stamp_map2.toSec(), stamp_map1.toSec()});
+      }
+    }
+  }
 
-  // BEAM_INFO("Filtering map 2");
-  // downsampler.SetInputCloud(
-  //     std::make_shared<pcl::PointCloud<pcl::PointXYZ>>(map2));
-  // downsampler.Filter();
-  // auto map2_filtered = downsampler.GetFilteredCloud();
-  // beam::SavePointCloud("/userhome/data/clouds/map2.pcd", map2_filtered);
+  /*************************************
+         Filter candidate matches
+  **************************************/
+  BEAM_INFO("Filtering visual matches with Scancontext");
+  beam_matching::GicpMatcher::Params matcher_params;
+  matcher_params.max_iter = 50;
+  beam_matching::GicpMatcher scan_registration(matcher_params);
+  SCManager scan_context_extractor;
 
-  // BEAM_INFO("Performing RANSAC scan registration");
-  // beam_matching::GicpMatcher::Params matcher_params;
-  // matcher_params.max_iter = 50;
-  // beam_matching::GicpMatcher scan_registration(matcher_params);
+  // lambda to get a scan as well as its N neighbours
+  auto get_neighbourhood_scan =
+      [&](auto pointclouds, const double timestamp,
+          const size_t radius) -> pcl::PointCloud<pcl::PointXYZI>::Ptr {
+    auto itlow = pointclouds.lower_bound(timestamp);
+    if (itlow == pointclouds.end() || itlow == pointclouds.begin()) {
+      return {};
+    }
+    pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_scan(
+        new pcl::PointCloud<pcl::PointXYZI>);
+    *aggregate_scan += *pointclouds[itlow->first];
 
-  // const int N = matched_stamps.size() - 1;
-  // Eigen::Matrix4d T_map1_map2_best;
-  // for (int i = 0; i < RANSAC_ITERATIONS; i++) {
-  //   int random_index = beam::randi(N, 0);
-  //   const auto [timestamp_map2, timestamp_map1] =
-  //   matched_stamps[random_index]; auto itlow1 =
-  //   pointclouds1.lower_bound(timestamp_map1); auto itlow2 =
-  //   pointclouds2.lower_bound(timestamp_map2); if (itlow1 !=
-  //   pointclouds1.end() && itlow2 != pointclouds2.end()) {
-  //     pcl::PointCloud<pcl::PointXYZRGB> cloud1_xyzrgb;
-  //     pcl::copyPointCloud(*itlow1->second, cloud1_xyzrgb);
-  //     for (size_t i = 0; i < cloud1_xyzrgb.points.size(); i++) {
-  //       cloud1_xyzrgb.points[i].r = 0;
-  //       cloud1_xyzrgb.points[i].g = 0;
-  //       cloud1_xyzrgb.points[i].b = 255;
-  //     }
+    auto cur_prev = itlow, cur_next = itlow;
+    for (int i = 0; i < radius; i++) {
+      cur_prev = std::prev(cur_prev);
+      if (cur_prev == pointclouds.begin()) {
+        return {};
+      }
+      *aggregate_scan += *pointclouds[cur_prev->first];
+      cur_next = std::next(cur_next);
+      if (cur_next == pointclouds.end()) {
+        return {};
+      }
+      *aggregate_scan += *pointclouds[cur_next->first];
+    }
+    return aggregate_scan;
+  };
 
-  //     pcl::PointCloud<pcl::PointXYZRGB> cloud2_xyzrgb;
-  //     pcl::copyPointCloud(*itlow2->second, cloud2_xyzrgb);
-  //     for (size_t i = 0; i < cloud2_xyzrgb.points.size(); i++) {
-  //       cloud2_xyzrgb.points[i].r = 255;
-  //       cloud2_xyzrgb.points[i].g = 0;
-  //       cloud2_xyzrgb.points[i].b = 0;
-  //     }
-  //     pcl::PointCloud<pcl::PointXYZRGB> combined_cloud;
-  //     combined_cloud += cloud1_xyzrgb;
-  //     combined_cloud += cloud2_xyzrgb;
-  //     std::string filename = std::to_string(random_index) + ".pcd";
-  //     auto success = beam::SavePointCloud("/userhome/data/clouds/" +
-  //     filename,
-  //                                         combined_cloud);
+  std::map<double, Eigen::Matrix4d> relative_poses; // <map2 stamp: T_map1_map2>
+  std::map<double, double> best_fitness; // <map2 stamp : best fitness>
+  std::map<double, double> best_match;   // <map2 stamp : map1 stamp>
 
-  //     // perform scan registration on cloud
-  //     scan_registration.SetRef(itlow1->second);
-  //     scan_registration.SetTarget(itlow2->second);
-  //     bool converged = scan_registration.Match();
-  //     auto T_map1_map2 = scan_registration.GetResult().inverse().matrix();
+  boost::progress_display pose_estimation_loading_bar(matched_stamps.size());
+  for (const auto &[timestamp_map2, timestamp_map1] : matched_stamps) {
+    ++pose_estimation_loading_bar;
+    // get aggregate scans around target timestamp
+    auto map1_scan =
+        get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 9);
+    auto map2_scan =
+        get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 9);
+    if (!map1_scan->empty() && !map2_scan->empty()) {
 
-  //     std::cout << std::fixed;
-  //     std::cout << "\nIteration: " << i << std::endl;
-  //     std::cout << "Index: " << random_index << std::endl;
-  //     std::cout << "Timestamp match: [" << timestamp_map2 << " : "
-  //               << timestamp_map1 << "]" << std::endl;
-  //     std::cout << "GICP Converged: " << converged << std::endl;
-  //     std::cout << "Result: \n" << T_map1_map2 << std::endl;
+      Eigen::Matrix4d T_WORLD_LIDAR1, T_WORLD_LIDAR2;
+      if (!map1.trajectory_lookup.GetT_WORLD_SENSOR(
+              T_WORLD_LIDAR1, ros::Time(timestamp_map1)) ||
+          !map2.trajectory_lookup.GetT_WORLD_SENSOR(
+              T_WORLD_LIDAR2, ros::Time(timestamp_map2))) {
+        continue;
+      }
 
-  //     // apply estimate to map2
-  //     pcl::PointCloud<pcl::PointXYZ>::Ptr map2_in_map1(
-  //         new pcl::PointCloud<pcl::PointXYZ>);
-  //     pcl::transformPointCloud(map2_filtered, *map2_in_map1, T_map1_map2);
+      // transform aggregate scans into their lidar frame for scan context
+      pcl::PointCloud<pcl::PointXYZI>::Ptr scan1_in_lidar_frame(
+          new pcl::PointCloud<pcl::PointXYZI>);
+      pcl::transformPointCloud(*map1_scan, *scan1_in_lidar_frame,
+                               beam::InvertTransform(T_WORLD_LIDAR1));
 
-  //     // compute GICP fitness score of map1-map2 without running any cycles
-  //     auto score =
-  //         beam::computePointCloudError(map1_filtered, map2_in_map1,
-  //         "nnplane");
-  //     std::cout << "Total fitness score: " << score << std::endl;
-  //   }
-  // }
+      pcl::PointCloud<pcl::PointXYZI>::Ptr scan2_in_lidar_frame(
+          new pcl::PointCloud<pcl::PointXYZI>);
+      pcl::transformPointCloud(*map2_scan, *scan2_in_lidar_frame,
+                               beam::InvertTransform(T_WORLD_LIDAR2));
+
+      // if the resulting scan contexts are not similar enough, reject
+      auto sc1 = scan_context_extractor.makeScancontext(*scan1_in_lidar_frame);
+      auto sc2 = scan_context_extractor.makeScancontext(*scan2_in_lidar_frame);
+      auto [dist, shift] =
+          scan_context_extractor.distanceBtnScanContext(sc1, sc2);
+      if (dist > 0.2) {
+        continue;
+      }
+
+      Eigen::Matrix4d T_map2_map1_init = visual_relative_poses[timestamp_map1];
+      // transform scan 2 into map 1 frame with the initial estimate
+      pcl::PointCloud<pcl::PointXYZ>::Ptr map1_cloud(
+          new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::copyPointCloud(*map1_scan, *map1_cloud);
+      pcl::PointCloud<pcl::PointXYZ>::Ptr map2_cloud(
+          new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::copyPointCloud(*map2_scan, *map2_cloud);
+
+      pcl::PointCloud<pcl::PointXYZRGB> cloud1_xyzrgb;
+      pcl::copyPointCloud(*map1_cloud, cloud1_xyzrgb);
+      for (size_t i = 0; i < cloud1_xyzrgb.points.size(); i++) {
+        cloud1_xyzrgb.points[i].r = 0;
+        cloud1_xyzrgb.points[i].g = 0;
+        cloud1_xyzrgb.points[i].b = 255;
+      }
+
+      pcl::PointCloud<pcl::PointXYZRGB> cloud2_xyzrgb;
+      pcl::copyPointCloud(*map2_cloud, cloud2_xyzrgb);
+      for (size_t i = 0; i < cloud2_xyzrgb.points.size(); i++) {
+        cloud2_xyzrgb.points[i].r = 255;
+        cloud2_xyzrgb.points[i].g = 0;
+        cloud2_xyzrgb.points[i].b = 0;
+      }
+
+      // attempt scan registration, keep best result
+      scan_registration.SetRef(map1_cloud);
+      scan_registration.SetTarget(map2_cloud);
+      bool converged = scan_registration.Match();
+      auto scan_reg_result = scan_registration.GetResult();
+      double fitness = scan_registration.GetFitnessScore();
+
+      Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
+
+      pcl::PointCloud<pcl::PointXYZ>::Ptr scan2_aligned(
+          new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::transformPointCloud(*map2_cloud, *scan2_aligned, T_map1_map2);
+      pcl::PointCloud<pcl::PointXYZRGB> cloud4_xyzrgb;
+      pcl::copyPointCloud(*scan2_aligned, cloud4_xyzrgb);
+      for (size_t i = 0; i < cloud4_xyzrgb.points.size(); i++) {
+        cloud4_xyzrgb.points[i].r = 0;
+        cloud4_xyzrgb.points[i].g = 255;
+        cloud4_xyzrgb.points[i].b = 0;
+      }
+
+      pcl::PointCloud<pcl::PointXYZRGB> combined_cloud;
+      combined_cloud += cloud1_xyzrgb;
+      combined_cloud += cloud2_xyzrgb;
+      combined_cloud += cloud4_xyzrgb;
+      std::string filename = std::to_string(timestamp_map1) + "_" +
+                             std::to_string(timestamp_map2) + ".pcd";
+      auto success = beam::SavePointCloud(
+          "/home/jake/results/vl_traj_alignment/cloud_matches_04/" + filename,
+          combined_cloud);
+
+      // update best result
+      if (relative_poses.find(timestamp_map2) != relative_poses.end()) {
+        if (best_fitness[timestamp_map2] > fitness) {
+          relative_poses[timestamp_map2] = T_map1_map2;
+          best_fitness[timestamp_map2] = fitness;
+          best_match[timestamp_map2] = timestamp_map1;
+        }
+      } else {
+        relative_poses[timestamp_map2] = T_map1_map2;
+        best_fitness[timestamp_map2] = fitness;
+        best_match[timestamp_map2] = timestamp_map1;
+      }
+    }
+  }
+
+  for (const auto &[stamp, pose] : relative_poses) {
+    std::cout << std::fixed << stamp << std::endl;
+    std::cout << pose << std::endl;
+  }
+
+  // todo: apply the resulting relative trajectory to the input trajectory
 
   return 0;
 }

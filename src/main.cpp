@@ -54,8 +54,7 @@ public:
     bag_file = J_map["bag_file"];
     std::string cam_file = J_map["camera_intrinsics_file"];
     cam_model = beam_calibration::CameraModel::Create(cam_file);
-    std::string trajectory_file = J_map["trajectory_file"];
-    beam_mapping::Poses trajectory;
+    trajectory_file = J_map["trajectory_file"];
     trajectory.LoadFromJSON(trajectory_file);
 
     // offset the trajectory if desired
@@ -100,6 +99,8 @@ public:
   }
 
   vl_traj_alignment::PoseLookup trajectory_lookup;
+  beam_mapping::Poses trajectory;
+  std::string trajectory_file;
   std::shared_ptr<beam_calibration::CameraModel> cam_model;
   std::map<double, pcl::PointCloud<pcl::PointXYZI>::Ptr> pointclouds;
   std::string bag_file;
@@ -246,7 +247,7 @@ int main(int argc, char *argv[]) {
         auto T_map2_map1_offset =
             beam_cv::RelativePoseEstimator::RANSACEstimator(
                 map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
-                beam_cv::EstimatorMethod::SEVENPOINT, 100, 10.0);
+                beam_cv::EstimatorMethod::SEVENPOINT, 50, 10.0);
         if (!T_map2_map1_offset.has_value()) {
           continue;
         }
@@ -280,6 +281,43 @@ int main(int argc, char *argv[]) {
       }
     }
   }
+
+  /*************************************
+         Get initial full maps
+  **************************************/
+  pcl::PointCloud<pcl::PointXYZ>::Ptr map1_full_cloud(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  for (const auto [stamp, cloud] : map1.pointclouds) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::copyPointCloud(*cloud, *map_cloud);
+    *map1_full_cloud += *map_cloud;
+  }
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr map2_full_cloud(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  for (const auto [stamp, cloud] : map2.pointclouds) {
+    pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::copyPointCloud(*cloud, *map_cloud);
+    *map2_full_cloud += *map_cloud;
+  }
+  Eigen::Vector3f scan_voxel_size(.5, .5, .5);
+  beam_filtering::VoxelDownsample<> downsampler(scan_voxel_size);
+
+  BEAM_INFO("Filtering map 1");
+  downsampler.SetInputCloud(map1_full_cloud);
+  downsampler.Filter();
+  auto map1_filtered = downsampler.GetFilteredCloud();
+  beam::SavePointCloud("/home/jake/results/vl_traj_alignment/map1.pcd",
+                       map1_filtered);
+
+  BEAM_INFO("Filtering map 2");
+  downsampler.SetInputCloud(map2_full_cloud);
+  downsampler.Filter();
+  auto map2_filtered = downsampler.GetFilteredCloud();
+  beam::SavePointCloud("/home/jake/results/vl_traj_alignment/map2.pcd",
+                       map2_filtered);
 
   /*************************************
          Filter candidate matches
@@ -356,11 +394,10 @@ int main(int argc, char *argv[]) {
       auto sc2 = scan_context_extractor.makeScancontext(*scan2_in_lidar_frame);
       auto [dist, shift] =
           scan_context_extractor.distanceBtnScanContext(sc1, sc2);
-      if (dist > 0.2) {
+      if (dist > 0.15) {
         continue;
       }
 
-      Eigen::Matrix4d T_map2_map1_init = visual_relative_poses[timestamp_map1];
       // transform scan 2 into map 1 frame with the initial estimate
       pcl::PointCloud<pcl::PointXYZ>::Ptr map1_cloud(
           new pcl::PointCloud<pcl::PointXYZ>);
@@ -369,51 +406,25 @@ int main(int argc, char *argv[]) {
           new pcl::PointCloud<pcl::PointXYZ>);
       pcl::copyPointCloud(*map2_scan, *map2_cloud);
 
-      pcl::PointCloud<pcl::PointXYZRGB> cloud1_xyzrgb;
-      pcl::copyPointCloud(*map1_cloud, cloud1_xyzrgb);
-      for (size_t i = 0; i < cloud1_xyzrgb.points.size(); i++) {
-        cloud1_xyzrgb.points[i].r = 0;
-        cloud1_xyzrgb.points[i].g = 0;
-        cloud1_xyzrgb.points[i].b = 255;
-      }
-
-      pcl::PointCloud<pcl::PointXYZRGB> cloud2_xyzrgb;
-      pcl::copyPointCloud(*map2_cloud, cloud2_xyzrgb);
-      for (size_t i = 0; i < cloud2_xyzrgb.points.size(); i++) {
-        cloud2_xyzrgb.points[i].r = 255;
-        cloud2_xyzrgb.points[i].g = 0;
-        cloud2_xyzrgb.points[i].b = 0;
-      }
-
       // attempt scan registration, keep best result
       scan_registration.SetRef(map1_cloud);
       scan_registration.SetTarget(map2_cloud);
       bool converged = scan_registration.Match();
       auto scan_reg_result = scan_registration.GetResult();
       double fitness = scan_registration.GetFitnessScore();
-
       Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
 
-      pcl::PointCloud<pcl::PointXYZ>::Ptr scan2_aligned(
+      // check its fitness on the full map
+      pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
           new pcl::PointCloud<pcl::PointXYZ>);
-      pcl::transformPointCloud(*map2_cloud, *scan2_aligned, T_map1_map2);
-      pcl::PointCloud<pcl::PointXYZRGB> cloud4_xyzrgb;
-      pcl::copyPointCloud(*scan2_aligned, cloud4_xyzrgb);
-      for (size_t i = 0; i < cloud4_xyzrgb.points.size(); i++) {
-        cloud4_xyzrgb.points[i].r = 0;
-        cloud4_xyzrgb.points[i].g = 255;
-        cloud4_xyzrgb.points[i].b = 0;
-      }
+      pcl::transformPointCloud(map2_filtered, *map2_aligned_to_map1,
+                               T_map1_map2);
+      const float error =
+          beam::PointCloudError(map1_filtered, *map2_aligned_to_map1);
 
-      pcl::PointCloud<pcl::PointXYZRGB> combined_cloud;
-      combined_cloud += cloud1_xyzrgb;
-      combined_cloud += cloud2_xyzrgb;
-      combined_cloud += cloud4_xyzrgb;
-      std::string filename = std::to_string(timestamp_map1) + "_" +
-                             std::to_string(timestamp_map2) + ".pcd";
-      auto success = beam::SavePointCloud(
-          "/home/jake/results/vl_traj_alignment/cloud_matches_04/" + filename,
-          combined_cloud);
+      if (error > 10.0) {
+        continue;
+      }
 
       // update best result
       if (relative_poses.find(timestamp_map2) != relative_poses.end()) {
@@ -430,12 +441,89 @@ int main(int argc, char *argv[]) {
     }
   }
 
+  /*************************************
+      Apply resulting relative poses
+  **************************************/
+  // create a relative trajectory lookup for transforms from map 2 to map 1
+  std::vector<ros::Time> stamps;
+  std::vector<Eigen::Matrix4d, beam::AlignMat4d> poses;
   for (const auto &[stamp, pose] : relative_poses) {
-    std::cout << std::fixed << stamp << std::endl;
-    std::cout << pose << std::endl;
+    stamps.push_back(ros::Time(stamp));
+    poses.push_back(pose);
+  }
+  const auto start_pose = poses[0];
+  const auto end_pose = poses[poses.size() - 1];
+  const auto start_stamp = stamps[0];
+  const auto end_stamp = stamps[poses.size() - 1];
+  beam_mapping::Poses relative_trajectory;
+  relative_trajectory.SetTimeStamps(stamps);
+  relative_trajectory.SetPoses(poses);
+  vl_traj_alignment::PoseLookup relative_traj_lookup(relative_trajectory,
+                                                     "map2", "map1");
+
+  // apply relative estimates to map2 trajectory
+  std::vector<Eigen::Matrix4d, beam::AlignMat4d> map2_updated_poses;
+
+  const auto map2_poses = map2.trajectory.GetPoses();
+  const auto map2_stamps = map2.trajectory.GetTimeStamps();
+  const auto N = map2_poses.size();
+  for (int i = 0; i < N; i++) {
+    const auto T_map2_lidar = map2_poses[i];
+    const auto stamp = map2_stamps[i];
+    Eigen::Matrix4d T_map1_map2;
+    if (!relative_traj_lookup.GetT_WORLD_SENSOR(T_map1_map2, stamp)) {
+      if (stamp < start_stamp) {
+        T_map1_map2 = start_pose;
+      } else if (stamp > end_stamp) {
+        T_map1_map2 = end_pose;
+      }
+    }
+    std::cout << stamp << std::endl;
+    std::cout << T_map1_map2 << std::endl;
+    Eigen::Matrix4d updated_pose = T_map1_map2 * T_map2_lidar;
+    map2_updated_poses.push_back(updated_pose);
   }
 
-  // todo: apply the resulting relative trajectory to the input trajectory
+  beam_mapping::Poses map2_updated_trajectory;
+  map2_updated_trajectory.SetTimeStamps(map2_stamps);
+  map2_updated_trajectory.SetPoses(map2_updated_poses);
+  std::string output_file =
+      map2.trajectory_file.substr(0, map2.trajectory_file.length() - 5) +
+      "_aligned.json";
+  map2_updated_trajectory.WriteToJSON(output_file);
+
+  /*********************************************
+    Create final aligned map for visualization
+  **********************************************/
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr map2_full_cloud_aligned(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  for (const auto [stamp, cloud] : map2.pointclouds) {
+    ros::Time timestamp(stamp);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::copyPointCloud(*cloud, *map_cloud);
+    Eigen::Matrix4d T_map1_map2;
+    if (!relative_traj_lookup.GetT_WORLD_SENSOR(T_map1_map2, timestamp)) {
+      if (timestamp < start_stamp) {
+        T_map1_map2 = start_pose;
+      } else if (timestamp > end_stamp) {
+        T_map1_map2 = end_pose;
+      }
+    }
+    pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::transformPointCloud(*map_cloud, *aligned_cloud, T_map1_map2);
+
+    *map2_full_cloud_aligned += *aligned_cloud;
+  }
+
+  BEAM_INFO("Filtering aligned map 2");
+  downsampler.SetInputCloud(map2_full_cloud_aligned);
+  downsampler.Filter();
+  auto map2_aligned_filtered = downsampler.GetFilteredCloud();
+  beam::SavePointCloud("/home/jake/results/vl_traj_alignment/map2_aligned.pcd",
+                       map2_aligned_filtered);
 
   return 0;
 }

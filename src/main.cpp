@@ -414,16 +414,18 @@ int main(int argc, char *argv[]) {
       double fitness = scan_registration.GetFitnessScore();
       Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
 
-      // check its fitness on the full map
-      pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
-          new pcl::PointCloud<pcl::PointXYZ>);
-      pcl::transformPointCloud(map2_filtered, *map2_aligned_to_map1,
-                               T_map1_map2);
-      const float error =
-          beam::PointCloudError(map1_filtered, *map2_aligned_to_map1);
+      { // ! may not be needed?
+        // check its fitness on the full map to check for outrageous outliers
+        pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::transformPointCloud(map2_filtered, *map2_aligned_to_map1,
+                                 T_map1_map2);
+        const float error =
+            beam::PointCloudError(map1_filtered, *map2_aligned_to_map1);
 
-      if (error > 10.0) {
-        continue;
+        if (error > 100.0) {
+          continue;
+        }
       }
 
       // update best result
@@ -478,8 +480,6 @@ int main(int argc, char *argv[]) {
         T_map1_map2 = end_pose;
       }
     }
-    std::cout << stamp << std::endl;
-    std::cout << T_map1_map2 << std::endl;
     Eigen::Matrix4d updated_pose = T_map1_map2 * T_map2_lidar;
     map2_updated_poses.push_back(updated_pose);
   }
@@ -495,7 +495,6 @@ int main(int argc, char *argv[]) {
   /*********************************************
     Create final aligned map for visualization
   **********************************************/
-
   pcl::PointCloud<pcl::PointXYZ>::Ptr map2_full_cloud_aligned(
       new pcl::PointCloud<pcl::PointXYZ>);
   for (const auto [stamp, cloud] : map2.pointclouds) {

@@ -1,8 +1,8 @@
 {
-  "bag_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_21_54_ConestogoBridge/output.bag",
-  "trajectory_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_21_54_ConestogoBridge/2021_10_27_16_21_54.json",
-  "camera_intrinsics_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_21_54_ConestogoBridge/F1.json",
+  "bag_file": "/home/jake/data/StructuresLab/2021_10_27_14_22_19_StructuresLabHandheld/data.bag",
+  "trajectory_file": "/home/jake/data/StructuresLab/2021_10_27_14_22_19_StructuresLabHandheld/poses.json",
+  "camera_intrinsics_file": "/home/jake/data/StructuresLab/2021_10_27_14_22_19_StructuresLabHandheld/F1.json",
   "lidar_frame_id": "lidar_h_link",
-  "image_topic": "/F1/image_raw",
+  "image_topic": "/F1/image",
   "lidar_topic": "/lidar_h/velodyne_points"
 }

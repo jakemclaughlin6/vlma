@@ -114,3 +114,18 @@ target_link_libraries(${PROJECT_NAME}_main
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
 )
+
+add_executable(${PROJECT_NAME}_bag_to_traj
+	src/bag_to_traj.cpp
+)
+add_dependencies(${PROJECT_NAME}_bag_to_traj
+  ${catkin_EXPORTED_TARGETS}
+)
+target_include_directories(${PROJECT_NAME}_bag_to_traj
+  PUBLIC
+    ${PROJECT_NAME}
+)
+target_link_libraries(${PROJECT_NAME}_bag_to_traj
+  ${PROJECT_NAME}
+  ${catkin_LIBRARIES}
+)

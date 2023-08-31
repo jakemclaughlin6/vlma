@@ -129,3 +129,18 @@ target_link_libraries(${PROJECT_NAME}_bag_to_traj
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
 )
+
+add_executable(${PROJECT_NAME}_con_slam_to_bag
+	src/con_slam_to_bag.cpp
+)
+add_dependencies(${PROJECT_NAME}_con_slam_to_bag
+  ${catkin_EXPORTED_TARGETS}
+)
+target_include_directories(${PROJECT_NAME}_con_slam_to_bag
+  PUBLIC
+    ${PROJECT_NAME}
+)
+target_link_libraries(${PROJECT_NAME}_con_slam_to_bag
+  ${PROJECT_NAME}
+  ${catkin_LIBRARIES}
+)

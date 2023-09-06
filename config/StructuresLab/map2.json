@@ -1,0 +1,8 @@
+{
+  "bag_file": "/home/jake/data/StructuresLab/2021_09_30_13_14_46_StructuresLabAndHallway/data.bag",
+  "trajectory_file": "/home/jake/data/StructuresLab/2021_09_30_13_14_46_StructuresLabAndHallway/poses.json",
+  "camera_intrinsics_file": "/home/jake/data/StructuresLab/2021_09_30_13_14_46_StructuresLabAndHallway/F1.json",
+  "lidar_frame_id": "lidar_h_link",
+  "image_topic": "/F1/image_raw",
+  "lidar_topic": "/lidar_h/velodyne_points"
+}

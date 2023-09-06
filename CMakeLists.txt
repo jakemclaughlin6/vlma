@@ -144,3 +144,18 @@ target_link_libraries(${PROJECT_NAME}_con_slam_to_bag
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
 )
+
+add_executable(${PROJECT_NAME}_aloam_to_json
+	src/aloam_to_json.cpp
+)
+add_dependencies(${PROJECT_NAME}_aloam_to_json
+  ${catkin_EXPORTED_TARGETS}
+)
+target_include_directories(${PROJECT_NAME}_aloam_to_json
+  PUBLIC
+    ${PROJECT_NAME}
+)
+target_link_libraries(${PROJECT_NAME}_aloam_to_json
+  ${PROJECT_NAME}
+  ${catkin_LIBRARIES}
+)

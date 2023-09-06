@@ -1,5 +1,5 @@
 {
-  "bag_file": "/home/jake/data/StructuresLab/2021_10_21_12_50_44_StructuresLab/data.bag",
+  "bag_file": "/home/jake/data/StructuresLab/2021_10_21_12_50_44_StructuresLab/cropped.bag",
   "trajectory_file": "/home/jake/data/StructuresLab/2021_10_21_12_50_44_StructuresLab/poses.json",
   "camera_intrinsics_file": "/home/jake/data/StructuresLab/2021_10_21_12_50_44_StructuresLab/F1.json",
   "lidar_frame_id": "lidar_h_link",

@@ -152,6 +152,7 @@ int main(int argc, char *argv[]) {
   std::map<ros::Time, Eigen::Matrix4d>
       visual_relative_poses; // <map1 stamp: T_map2_map1>
   std::map<ros::Time, cv::Mat> db_images;
+  beam_cv::ImageDatabase image_db;
 
   // visual feature detector, desciptor, matcher and tracker
   auto detector = std::make_shared<beam_cv::ORBDetector>(200);
@@ -161,9 +162,6 @@ int main(int argc, char *argv[]) {
   beam_cv::KLTracker::Params tracker_params;
   auto tracker = std::make_shared<beam_cv::KLTracker>(tracker_params, detector,
                                                       nullptr, 500);
-
-  // image database
-  beam_cv::ImageDatabase image_db;
 
   /*************************************
                 Process bag 1
@@ -253,6 +251,9 @@ int main(int argc, char *argv[]) {
         }
         const auto stamp_map1 =
             image_db.GetImageTimestamp(results[0].Id).value();
+        if (db_images.find(stamp_map1) == db_images.end()) {
+          continue;
+        }
         // match descriptors directly
         std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map2;
         std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map1;
@@ -322,7 +323,7 @@ int main(int argc, char *argv[]) {
     pcl::copyPointCloud(*cloud, *map_cloud);
     *map2_full_cloud += *map_cloud;
   }
-  Eigen::Vector3f scan_voxel_size(.5, .5, .5);
+  Eigen::Vector3f scan_voxel_size(.1, .1, .1);
   beam_filtering::VoxelDownsample<> downsampler(scan_voxel_size);
 
   BEAM_INFO("Filtering map 1");

@@ -159,3 +159,18 @@ target_link_libraries(${PROJECT_NAME}_aloam_to_json
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
 )
+
+add_executable(${PROJECT_NAME}_highlight_changes
+	src/highlight_changes.cpp
+)
+add_dependencies(${PROJECT_NAME}_highlight_changes
+  ${catkin_EXPORTED_TARGETS}
+)
+target_include_directories(${PROJECT_NAME}_highlight_changes
+  PUBLIC
+    ${PROJECT_NAME}
+)
+target_link_libraries(${PROJECT_NAME}_highlight_changes
+  ${PROJECT_NAME}
+  ${catkin_LIBRARIES}
+)

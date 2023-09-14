@@ -63,11 +63,15 @@ public:
 
     // offset the trajectory if desired
     if (offset_poses) {
-      Eigen::Matrix4d random_offset = beam::GenerateRandomPose(1.0, 10.0);
+      Eigen::Vector3d pert = beam::UniformRandomVector<3>(5.0, 10.0);
+      pert.z() = 0.0;
       auto traj_poses = trajectory.GetPoses();
       std::vector<Eigen::Matrix4d, beam::AlignMat4d> offset_poses;
       for (const auto pose : traj_poses) {
-        offset_poses.push_back(pose * random_offset);
+        Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
+        T.block<3, 3>(0, 0) = pose.block<3, 3>(0, 0);
+        T.block<3, 1>(0, 3) = pose.block<3, 1>(0, 3) + pert;
+        offset_poses.push_back(T);
       }
       trajectory.SetPoses(offset_poses);
     }
@@ -380,13 +384,16 @@ int main(int argc, char *argv[]) {
 
   // boost::progress_display pose_estimation_loading_bar(matched_stamps.size());
   size_t i = 0;
-  for (const auto &[timestamp_map2, timestamp_map1] : matched_stamps) {
+  for (const auto [timestamp_map2, timestamp_map1] : matched_stamps) {
+    BEAM_INFO("Starting loop");
     // ++pose_estimation_loading_bar;
     // get aggregate scans around target timestamp
+    std::cout << "Getting aggregate scan: " << std::endl;
     auto map1_scan =
         get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 5);
     auto map2_scan =
         get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 5);
+        std::cout << "    Retrieved." << std::endl;
     if (!map1_scan->empty() && !map2_scan->empty()) {
       // get poses of each lidar scan
       Eigen::Matrix4d T_WORLD_LIDAR1, T_WORLD_LIDAR2;

@@ -1,8 +1,8 @@
 {
-  "bag_file": "/home/jake/data/StructuresLab/2021_09_30_13_11_05_StructuresLab/data.bag",
+  "bag_file": "/home/jake/data/StructuresLab/2021_09_30_13_11_05_StructuresLab/processed.bag",
   "trajectory_file": "/home/jake/data/StructuresLab/2021_09_30_13_11_05_StructuresLab/poses.json",
   "camera_intrinsics_file": "/home/jake/data/StructuresLab/2021_09_30_13_11_05_StructuresLab/F1.json",
   "lidar_frame_id": "lidar_h_link",
-  "image_topic": "/F1/image_raw",
+  "image_topic": "/F1/image_raw_resized",
   "lidar_topic": "/lidar_h/velodyne_points"
 }

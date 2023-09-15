@@ -50,10 +50,10 @@ double ComputeSCDist(SCManager &sc,
   return dist;
 }
 
-std::pair<double, Eigen::Matrix4d>
-RegisterScans(beam_matching::GicpMatcher &matcher,
-              const pcl::PointCloud<pcl::PointXYZI> &cloud1,
-              const pcl::PointCloud<pcl::PointXYZI> &cloud2) {
+bool RegisterScans(beam_matching::GicpMatcher &matcher,
+                   const pcl::PointCloud<pcl::PointXYZI> &cloud1,
+                   const pcl::PointCloud<pcl::PointXYZI> &cloud2,
+                   double &fitness, Eigen::Matrix4d &T_map1_map2) {
   // transform scan 2 into map 1 frame with the initial estimate
   pcl::PointCloud<pcl::PointXYZ>::Ptr map1_cloud(
       new pcl::PointCloud<pcl::PointXYZ>);
@@ -67,9 +67,9 @@ RegisterScans(beam_matching::GicpMatcher &matcher,
   matcher.SetTarget(map2_cloud);
   bool converged = matcher.Match();
   auto scan_reg_result = matcher.GetResult();
-  double fitness = matcher.GetFitnessScore();
-  Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
-  return {fitness, T_map1_map2};
+  fitness = matcher.GetFitnessScore();
+  T_map1_map2 = scan_reg_result.inverse().matrix();
+  return converged;
 }
 
 template <typename PointT>

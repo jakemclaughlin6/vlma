@@ -8,8 +8,6 @@
 
 #include <gflags/gflags.h>
 
-using namespace boost::lambda;
-
 DEFINE_string(map1_cloud_path, "", "Full path to image folder.");
 DEFINE_validator(map1_cloud_path, &beam::gflags::ValidateFileMustExist);
 

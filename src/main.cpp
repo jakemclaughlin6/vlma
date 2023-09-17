@@ -589,5 +589,30 @@ int main(int argc, char *argv[]) {
   beam::SavePointCloud(output_folder + "/map2_aligned.pcd",
                        map2_aligned_filtered);
 
+  /*********************************************
+                  Final analytics
+  **********************************************/
+  double full_map_fitness =
+      beam::PointCloudError(*map1_full_cloud, *map2_full_cloud_aligned);
+  BEAM_INFO("Full map fitness Score (Non-Rigid Alignment): {}",
+            full_map_fitness);
+
+  BEAM_INFO("Attempting full map GICP.");
+  scan_registration.SetRef(map1_full_cloud);
+  scan_registration.SetTarget(map2_full_cloud);
+  bool converged = scan_registration.Match();
+  auto scan_reg_result = scan_registration.GetResult();
+  Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
+
+  pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
+      new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::transformPointCloud(*map2_full_cloud, *map2_aligned_to_map1,
+                           T_map1_map2);
+
+  double full_map_fitness_gicp =
+      beam::PointCloudError(*map1_full_cloud, *map2_aligned_to_map1);
+
+  BEAM_INFO("Full map fitness score (GICP): {}", full_map_fitness_gicp);
+
   return 0;
 }

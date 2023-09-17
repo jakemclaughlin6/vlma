@@ -45,13 +45,16 @@ DEFINE_double(alignment_alpha, 1.0,
 DEFINE_bool(offset_map2, false,
             "Whether to offset the second map trajectory (for testing)");
 
-std::string output_folder = "/home/jake/results/vl_traj_alignment/";
+std::string output_folder = beam::CombinePaths(
+    "/home/jake/results/vl_traj_alignment/",
+    beam::ConvertTimeToDate(std::chrono::system_clock::now()));
 
 namespace vl_traj_alignment {
 class Map {
 public:
   Map(const std::string &json_path, bool offset_poses,
       const std::string &world_frame) {
+    static int map_num = 1;
     nlohmann::json J_map;
     beam::ReadJson(json_path, J_map);
 
@@ -63,18 +66,28 @@ public:
 
     // offset the trajectory if desired
     if (offset_poses) {
-      Eigen::Vector3d pert = beam::UniformRandomVector<3>(5.0, 10.0);
+      Eigen::Vector3d pert = beam::UniformRandomVector<3>(3.0, 7.0);
       pert.z() = 0.0;
       auto traj_poses = trajectory.GetPoses();
-      std::vector<Eigen::Matrix4d, beam::AlignMat4d> offset_poses;
+      std::vector<Eigen::Matrix4d, beam::AlignMat4d> new_poses;
       for (const auto pose : traj_poses) {
         Eigen::Matrix4d T = Eigen::Matrix4d::Identity();
         T.block<3, 3>(0, 0) = pose.block<3, 3>(0, 0);
         T.block<3, 1>(0, 3) = pose.block<3, 1>(0, 3) + pert;
-        offset_poses.push_back(T);
+        new_poses.push_back(T);
       }
-      trajectory.SetPoses(offset_poses);
+      trajectory.SetPoses(new_poses);
     }
+
+    // save trajectory as point cloud
+    pcl::PointCloud<pcl::PointXYZRGB> trajectory_cloud;
+    for (const auto &T : trajectory.GetPoses()) {
+      trajectory_cloud = beam::AddFrameToCloud(trajectory_cloud, T);
+    }
+    beam::SavePointCloud(output_folder + "/map" + std::to_string(map_num) +
+                             "_trajectory.pcd",
+                         trajectory_cloud);
+    map_num++;
 
     std::string lidar_frame = J_map["lidar_frame_id"];
     vl_traj_alignment::PoseLookup traj_lookup_tmp(trajectory, lidar_frame,
@@ -133,24 +146,22 @@ int main(int argc, char *argv[]) {
   vl_traj_alignment::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2,
                               "world");
 
-  // output eachs maps trajectory
-  {
-    pcl::PointCloud<pcl::PointXYZRGB> trajectory_cloud;
-    for (const auto &T : map1.trajectory.GetPoses()) {
-      trajectory_cloud = beam::AddFrameToCloud(trajectory_cloud, T);
-    }
-    beam::SavePointCloud(output_folder + "trajectory1.pcd", trajectory_cloud);
+  // setup output folder
+  if (!boost::filesystem::is_directory(output_folder)) {
+    boost::filesystem::create_directory(output_folder);
   }
-  {
-    pcl::PointCloud<pcl::PointXYZRGB> trajectory_cloud;
-    for (const auto &T : map2.trajectory.GetPoses()) {
-      trajectory_cloud = beam::AddFrameToCloud(trajectory_cloud, T);
-    }
-    beam::SavePointCloud(output_folder + "trajectory2.pcd", trajectory_cloud);
+  if (!boost::filesystem::is_directory(output_folder + "/image_matches")) {
+    boost::filesystem::create_directory(output_folder + "/image_matches");
   }
-
-  // std::map<ros::Time, Eigen::Matrix4d>
-  //     visual_relative_poses; // <map1 stamp: T_map2_map1>
+  if (!boost::filesystem::is_directory(output_folder + "/image_matches/map1")) {
+    boost::filesystem::create_directory(output_folder + "/image_matches/map1");
+  }
+  if (!boost::filesystem::is_directory(output_folder + "/image_matches/map2")) {
+    boost::filesystem::create_directory(output_folder + "/image_matches/map2");
+  }
+  if (!boost::filesystem::is_directory(output_folder + "/cloud_matches")) {
+    boost::filesystem::create_directory(output_folder + "/cloud_matches");
+  }
 
   // storage variables
   std::vector<std::pair<ros::Time, ros::Time>>
@@ -226,7 +237,8 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  BEAM_INFO("Training vocabulary on map 1, numer of features: {}", features.size());
+  BEAM_INFO("Training vocabulary on map 1, numer of features: {}",
+            features.size());
   DBoW3::Vocabulary map1_vocabulary(9, 3, DBoW3::TF_IDF, DBoW3::L1_NORM);
   map1_vocabulary.create(features);
 
@@ -309,10 +321,10 @@ int main(int argc, char *argv[]) {
           continue;
         }
 
-        cv::imwrite(output_folder + "image_matches/map1/" +
+        cv::imwrite(output_folder + "/image_matches/map1/" +
                         std::to_string(idx) + ".png",
                     map1_image);
-        cv::imwrite(output_folder + "image_matches/map2/" +
+        cv::imwrite(output_folder + "/image_matches/map2/" +
                         std::to_string(idx) + ".png",
                     image);
         idx++;
@@ -351,13 +363,13 @@ int main(int argc, char *argv[]) {
   downsampler.SetInputCloud(map1_full_cloud);
   downsampler.Filter();
   auto map1_filtered = downsampler.GetFilteredCloud();
-  beam::SavePointCloud(output_folder + "map1.pcd", map1_filtered);
+  beam::SavePointCloud(output_folder + "/map1.pcd", map1_filtered);
 
   BEAM_INFO("Filtering map 2");
   downsampler.SetInputCloud(map2_full_cloud);
   downsampler.Filter();
   auto map2_filtered = downsampler.GetFilteredCloud();
-  beam::SavePointCloud(output_folder + "map2.pcd", map2_filtered);
+  beam::SavePointCloud(output_folder + "/map2.pcd", map2_filtered);
 
   /*************************************
          Filter candidate matches
@@ -420,6 +432,7 @@ int main(int argc, char *argv[]) {
     auto map2_scan =
         get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 20);
     if (map1_scan && map2_scan) {
+
       // get poses of each lidar scan
       Eigen::Matrix4d T_WORLD_LIDAR1, T_WORLD_LIDAR2;
       if (!map1.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR1,
@@ -435,19 +448,22 @@ int main(int argc, char *argv[]) {
       if (dist > 0.15) {
         continue;
       }
+
       // attempt scan registration
       double fitness;
       Eigen::Matrix4d T_map1_map2;
       bool converged = RegisterScans(scan_registration, *map1_scan, *map2_scan,
                                      fitness, T_map1_map2);
-      if (fitness > 1.0 || !converged) {
+      if (fitness > 0.5 || !converged) {
         continue;
       }
+
       // check its fitness on a larger aggregate scan
       auto map1_scan_l =
           get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 40);
       auto map2_scan_l =
           get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 40);
+
       if (!map1_scan_l->empty() && !map2_scan_l->empty()) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1(
             new pcl::PointCloud<pcl::PointXYZI>);
@@ -458,7 +474,7 @@ int main(int argc, char *argv[]) {
         // visualize scan registration
         auto total_scan = CreateScanRegistrationCloud(
             *map1_scan_l, *map2_scan_l, *map2_aligned_to_map1);
-        beam::SavePointCloud(output_folder + "cloud_matches/" +
+        beam::SavePointCloud(output_folder + "/cloud_matches/" +
                                  std::to_string(timestamp_map1.toNSec()) + "_" +
                                  std::to_string(timestamp_map2.toNSec()) +
                                  ".pcd",
@@ -493,29 +509,21 @@ int main(int argc, char *argv[]) {
   /*************************************
       Apply resulting relative poses
   **************************************/
-  BEAM_INFO("Applying resulting relative poses");
-  // create a relative trajectory lookup for transforms from map 2 to map 1
-  std::vector<ros::Time> stamps;
-  std::vector<Eigen::Matrix4d, beam::AlignMat4d> poses;
-  for (const auto &[stamp, pose] : relative_poses) {
-    stamps.push_back(stamp);
-    poses.push_back(pose);
-    std::cout << std::endl;
-    std::cout << stamp << std::endl;
-    std::cout << pose << std::endl;
+  BEAM_INFO("Estimating spline for relative trajectory.");
+  // create spline for relative estimates to smooth it
+  std::vector<beam::Pose> relative_trajectory;
+  for (const auto &[stamp, T_FIXED_MOVING] : relative_poses) {
+    beam::Pose pose{T_FIXED_MOVING, stamp.toNSec()};
+    relative_trajectory.push_back(pose);
   }
-  const auto start_pose = poses[0];
-  const auto end_pose = poses[poses.size() - 1];
-  const auto start_stamp = stamps[0];
-  const auto end_stamp = stamps[poses.size() - 1];
-  beam_mapping::Poses relative_trajectory;
-  relative_trajectory.SetTimeStamps(stamps);
-  relative_trajectory.SetPoses(poses);
-  vl_traj_alignment::PoseLookup relative_traj_lookup(relative_trajectory,
-                                                     "map2", "map1");
+  beam::BsplineSE3 spline;
+  spline.feed_trajectory(relative_trajectory);
 
-  // todo: estimate spline of relative trajectory
+  // get first and last pose rather than using the spline extrpolation
+  const auto start_pose = relative_trajectory[0];
+  const auto end_pose = relative_trajectory[relative_trajectory.size() - 1];
 
+  BEAM_INFO("Applying resulting relative poses.");
   // apply relative estimates to map2 trajectory
   std::vector<Eigen::Matrix4d, beam::AlignMat4d> map2_updated_poses;
   const auto map2_poses = map2.trajectory.GetPoses();
@@ -525,13 +533,15 @@ int main(int argc, char *argv[]) {
     const auto T_map2_lidar = map2_poses[i];
     const auto stamp = map2_stamps[i];
     Eigen::Matrix4d T_map1_map2;
-    if (!relative_traj_lookup.GetT_WORLD_SENSOR(T_map1_map2, stamp)) {
-      if (stamp < start_stamp) {
-        T_map1_map2 = start_pose;
-      } else if (stamp > end_stamp) {
-        T_map1_map2 = end_pose;
+    // get pose or "extrapolate"
+    if (!spline.get_pose(stamp.toSec(), T_map1_map2)) {
+      if (stamp.toNSec() < start_pose.timestampInNs) {
+        T_map1_map2 = start_pose.T_FIXED_MOVING;
+      } else if (stamp.toNSec() > end_pose.timestampInNs) {
+        T_map1_map2 = end_pose.T_FIXED_MOVING;
       }
     }
+
     Eigen::Matrix4d updated_pose = T_map1_map2 * T_map2_lidar;
     map2_updated_poses.push_back(updated_pose);
   }
@@ -547,22 +557,24 @@ int main(int argc, char *argv[]) {
   /*********************************************
     Create final aligned map for visualization
   **********************************************/
-  BEAM_INFO("Creating final aligned map for visualization");
+  BEAM_INFO("Creating final aligned map for visualization.");
   pcl::PointCloud<pcl::PointXYZ>::Ptr map2_full_cloud_aligned(
       new pcl::PointCloud<pcl::PointXYZ>);
   for (const auto [stamp, cloud] : map2.pointclouds) {
-    ros::Time timestamp(stamp);
     pcl::PointCloud<pcl::PointXYZ>::Ptr map_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
     pcl::copyPointCloud(*cloud, *map_cloud);
     Eigen::Matrix4d T_map1_map2;
-    if (!relative_traj_lookup.GetT_WORLD_SENSOR(T_map1_map2, timestamp)) {
-      if (timestamp < start_stamp) {
-        T_map1_map2 = start_pose;
-      } else if (timestamp > end_stamp) {
-        T_map1_map2 = end_pose;
+
+    // get pose or "extrapolate"
+    if (!spline.get_pose(stamp.toSec(), T_map1_map2)) {
+      if (stamp.toNSec() < start_pose.timestampInNs) {
+        T_map1_map2 = start_pose.T_FIXED_MOVING;
+      } else if (stamp.toNSec() > end_pose.timestampInNs) {
+        T_map1_map2 = end_pose.T_FIXED_MOVING;
       }
     }
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr aligned_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
     pcl::transformPointCloud(*map_cloud, *aligned_cloud, T_map1_map2);
@@ -574,7 +586,7 @@ int main(int argc, char *argv[]) {
   downsampler.SetInputCloud(map2_full_cloud_aligned);
   downsampler.Filter();
   auto map2_aligned_filtered = downsampler.GetFilteredCloud();
-  beam::SavePointCloud(output_folder + "map2_aligned.pcd",
+  beam::SavePointCloud(output_folder + "/map2_aligned.pcd",
                        map2_aligned_filtered);
 
   return 0;

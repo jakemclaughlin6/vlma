@@ -28,7 +28,9 @@
 #include <boost/progress.hpp>
 #include <gflags/gflags.h>
 
-constexpr int RANSAC_ITERATIONS = 50;
+DEFINE_string(output_root, "/home/jake/results/vl_traj_alignment/",
+              "Full path to output folder.");
+DEFINE_validator(output_root, &beam::gflags::ValidateDirMustExist);
 
 DEFINE_string(map1_config_file, "",
               "Full path to config file to load (Required).");
@@ -38,15 +40,17 @@ DEFINE_string(map2_config_file, "",
               "Full path to config file to load (Required).");
 DEFINE_validator(map2_config_file, &beam::gflags::ValidateFileMustExist);
 
-DEFINE_double(alignment_alpha, 1.0,
-              "Amount ot align map2 to map1 (1.0 align map2 completely to "
-              "map1, 0.0 align map1 completely to map2)");
-
 DEFINE_bool(offset_map2, false,
             "Whether to offset the second map trajectory (for testing)");
 
+DEFINE_double(alpha, 0.5, "Minimum DBoW Similarity.");
+DEFINE_double(phi, 0.5, "Minimum visual inlier ratio.");
+DEFINE_double(psi, 0.15, "Maximum Scan Context distance.");
+DEFINE_double(xi, 0.5, "Maximum scan registration fitness between matches.");
+DEFINE_int32(R, 18, "Point Cloud Aggregation radius.");
+
 std::string output_folder = beam::CombinePaths(
-    "/home/jake/results/vl_traj_alignment/",
+    FLAGS_output_root,
     beam::ConvertTimeToDate(std::chrono::system_clock::now()));
 
 namespace vl_traj_alignment {
@@ -285,7 +289,7 @@ int main(int argc, char *argv[]) {
         }
         const auto score = results[0].Score;
         if (!image_db.GetImageTimestamp(results[0].Id).has_value() ||
-            score < 0.5) {
+            score < FLAGS_alpha) {
           continue;
         }
         const auto stamp_map1 =
@@ -317,7 +321,7 @@ int main(int argc, char *argv[]) {
             Eigen::Matrix4d::Identity(), T_map2_map1_offset.value(), 10.0);
         const float inlier_ratio =
             (float)num_inliers / (float)pixels_map1.size();
-        if (inlier_ratio < 0.5) {
+        if (inlier_ratio < FLAGS_phi) {
           continue;
         }
 
@@ -422,15 +426,16 @@ int main(int argc, char *argv[]) {
   }
 
   BEAM_INFO("Filtering visual matches with Scancontext");
+  std::cout << std::fixed;
   // boost::progress_display pose_estimation_loading_bar(matched_stamps.size());
   size_t i = 0;
   for (const auto &[timestamp_map2, timestamp_map1] : matched_stamps) {
     // ++pose_estimation_loading_bar;
     // get aggregate scans around target timestamp
     auto map1_scan =
-        get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 20);
+        get_neighbourhood_scan(map1.pointclouds, timestamp_map1, FLAGS_R);
     auto map2_scan =
-        get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 20);
+        get_neighbourhood_scan(map2.pointclouds, timestamp_map2, FLAGS_R);
     if (map1_scan && map2_scan) {
 
       // get poses of each lidar scan
@@ -445,7 +450,7 @@ int main(int argc, char *argv[]) {
       // compute scan context distance
       auto dist = ComputeSCDist(scan_context_extractor, *map1_scan,
                                 T_WORLD_LIDAR1, *map2_scan, T_WORLD_LIDAR2);
-      if (dist > 0.15) {
+      if (dist > FLAGS_psi) {
         continue;
       }
 
@@ -454,15 +459,15 @@ int main(int argc, char *argv[]) {
       Eigen::Matrix4d T_map1_map2;
       bool converged = RegisterScans(scan_registration, *map1_scan, *map2_scan,
                                      fitness, T_map1_map2);
-      if (fitness > 0.5 || !converged) {
+      if (fitness > FLAGS_xi || !converged) {
         continue;
       }
 
       // check its fitness on a larger aggregate scan
       auto map1_scan_l =
-          get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 40);
+          get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 2 * FLAGS_R);
       auto map2_scan_l =
-          get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 40);
+          get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 2 * FLAGS_R);
 
       if (!map1_scan_l->empty() && !map2_scan_l->empty()) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1(
@@ -481,13 +486,13 @@ int main(int argc, char *argv[]) {
                              *total_scan);
 
         // log results
-        std::cout << std::fixed << std::endl;
         std::cout << timestamp_map1 << " : " << timestamp_map2 << std::endl;
         std::cout << "Pose: \n" << T_map1_map2 << std::endl;
         std::cout << "Fitness: " << fitness << std::endl;
         std::cout << "RANSAC Fitness: " << ransac_fitness << std::endl;
         std::cout << "SC Dist: " << dist << std::endl;
         std::cout << "DBoW score: " << match_scores[i] << std::endl;
+        std::cout << std::endl;
         i++;
 
         // update best result

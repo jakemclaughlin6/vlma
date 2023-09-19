@@ -26,6 +26,55 @@
 
 #include <vl_traj_alignment/scancontext/Scancontext.h>
 
+void SetupOutputFolders(const std::string &output_folder) {
+  // setup output folder
+  if (!boost::filesystem::is_directory(output_folder)) {
+    boost::filesystem::create_directory(output_folder);
+  }
+  if (!boost::filesystem::is_directory(output_folder + "/image_matches")) {
+    boost::filesystem::create_directory(output_folder + "/image_matches");
+  }
+  if (!boost::filesystem::is_directory(output_folder + "/image_matches/map1")) {
+    boost::filesystem::create_directory(output_folder + "/image_matches/map1");
+  }
+  if (!boost::filesystem::is_directory(output_folder + "/image_matches/map2")) {
+    boost::filesystem::create_directory(output_folder + "/image_matches/map2");
+  }
+  if (!boost::filesystem::is_directory(output_folder + "/cloud_matches")) {
+    boost::filesystem::create_directory(output_folder + "/cloud_matches");
+  }
+}
+
+pcl::PointCloud<pcl::PointXYZI>::Ptr GetNeighbourhoodScan(
+    const std::map<ros::Time, pcl::PointCloud<pcl::PointXYZI>::Ptr>
+        &pointclouds,
+    const ros::Time timestamp, const size_t radius) {
+  auto itlow = pointclouds.lower_bound(timestamp);
+  if (itlow == pointclouds.end() || itlow == pointclouds.begin()) {
+    return nullptr;
+  }
+  pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_scan(
+      new pcl::PointCloud<pcl::PointXYZI>);
+  *aggregate_scan += *(pointclouds.at(itlow->first));
+
+  auto cur_prev = itlow, cur_next = itlow;
+  for (int i = 0; i < radius; i++) {
+    cur_prev = std::prev(cur_prev);
+    if (cur_prev != std::prev(pointclouds.begin())) {
+      if (pointclouds.find(cur_prev->first) != pointclouds.end()) {
+        *aggregate_scan += *(pointclouds.at(cur_prev->first));
+      }
+    }
+    cur_next = std::next(cur_next);
+    if (cur_next != pointclouds.end()) {
+      if (pointclouds.find(cur_next->first) != pointclouds.end()) {
+        *aggregate_scan += *(pointclouds.at(cur_next->first));
+      }
+    }
+  }
+  return aggregate_scan;
+}
+
 double ComputeSCDist(SCManager &sc,
                      const pcl::PointCloud<pcl::PointXYZI> &cloud1,
                      const Eigen::Matrix4d &T_WORLD_LIDAR1,

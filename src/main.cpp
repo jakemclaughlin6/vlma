@@ -145,27 +145,12 @@ int main(int argc, char *argv[]) {
     return -1;
   }
 
+  SetupOutputFolders(output_folder);
+
   // load each map object
   vl_traj_alignment::Map map1(FLAGS_map1_config_file, false, "world");
   vl_traj_alignment::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2,
                               "world");
-
-  // setup output folder
-  if (!boost::filesystem::is_directory(output_folder)) {
-    boost::filesystem::create_directory(output_folder);
-  }
-  if (!boost::filesystem::is_directory(output_folder + "/image_matches")) {
-    boost::filesystem::create_directory(output_folder + "/image_matches");
-  }
-  if (!boost::filesystem::is_directory(output_folder + "/image_matches/map1")) {
-    boost::filesystem::create_directory(output_folder + "/image_matches/map1");
-  }
-  if (!boost::filesystem::is_directory(output_folder + "/image_matches/map2")) {
-    boost::filesystem::create_directory(output_folder + "/image_matches/map2");
-  }
-  if (!boost::filesystem::is_directory(output_folder + "/cloud_matches")) {
-    boost::filesystem::create_directory(output_folder + "/cloud_matches");
-  }
 
   // storage variables
   std::vector<std::pair<ros::Time, ros::Time>>
@@ -175,15 +160,12 @@ int main(int argc, char *argv[]) {
 
   // visual feature detector, desciptor, matcher and tracker
   beam_cv::ORBDetector::Params detector_params{
-      300, 1.2, 8, 31, cv::ORB::FAST_SCORE, 20, 3, 2};
+      500, 1.2, 8, 31, cv::ORB::FAST_SCORE, 20, 1, 1};
   beam_cv::ORBDescriptor::Params descriptor_params;
   auto detector = std::make_shared<beam_cv::ORBDetector>(detector_params);
   auto descriptor = std::make_shared<beam_cv::ORBDescriptor>(descriptor_params);
   auto matcher = std::make_shared<beam_cv::BFMatcher>(cv::NORM_HAMMING, false,
                                                       false, 0.8, 5, true);
-  beam_cv::KLTracker::Params tracker_params;
-  auto tracker = std::make_shared<beam_cv::KLTracker>(tracker_params, detector,
-                                                      descriptor, 500);
 
   /*************************************
                 Process bag 1
@@ -194,7 +176,9 @@ int main(int argc, char *argv[]) {
   bag1.open(map1.bag_file);
   rosbag::View bag1_view(bag1, rosbag::TopicQuery(map1.topics));
   boost::progress_display loading_bar_bag1(bag1_view.size());
+  bool first_image = true;
   ros::Time prev_frame_time(0.0);
+  Eigen::Matrix4d T_WORLD_LIDARprev;
   for (rosbag::MessageInstance const m : bag1_view) {
     ++loading_bar_bag1;
 
@@ -208,39 +192,49 @@ int main(int argc, char *argv[]) {
     // add image to database if we've detected a keyframe
     auto buffer_image = m.instantiate<sensor_msgs::Image>();
     if (buffer_image) {
-      ros::Time stamp = buffer_image->header.stamp;
-      cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
-      tracker->AddImage(image, stamp);
+      const auto stamp_map1 = buffer_image->header.stamp;
+      // we process at a max of 5hz
+      if ((stamp_map1 - prev_frame_time).toSec() < 0.2) {
+        continue;
+      }
+      prev_frame_time = stamp_map1;
 
-      auto ids = tracker->GetLandmarkIDsInImage(stamp);
-      for (const auto id : ids) {
-        cv::Mat desc = tracker->GetDescriptor(stamp, id);
-        features.push_back(desc);
+      // skip any image that isn't within the trajectory
+      Eigen::Matrix4d T_WORLD_LIDAR;
+      if (!map1.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR,
+                                                    stamp_map1)) {
+        continue;
       }
 
-      if (prev_frame_time == ros::Time(0.0)) {
-        prev_frame_time = stamp;
-        db_images.insert({stamp, *buffer_image});
-      } else {
-        auto prev_ids = tracker->GetLandmarkIDsInImage(prev_frame_time);
-        size_t total_lms = prev_ids.size();
-        size_t num_matches = 0;
-        for (auto id : prev_ids) {
-          try {
-            tracker->Get(stamp, id);
-            num_matches++;
-          } catch (const std::out_of_range &oor) {
-          }
-        }
-        float percent_tracked = (float)num_matches / (float)total_lms;
-        if (percent_tracked <= 0.6) {
-          prev_frame_time = stamp;
-          db_images.insert({stamp, *buffer_image});
-        }
+      // add features to training list
+      cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
+      std::vector<cv::KeyPoint> kp;
+      cv::Mat desc;
+      beam_cv::DetectAndCompute(image, descriptor, detector, kp, desc);
+      for (int i = 0; i < kp.size(); i++) {
+        features.push_back(desc.row(i));
+      }
+
+      // add to database if its the first image
+      if (first_image) {
+        first_image = false;
+        db_images.insert({stamp_map1, *buffer_image});
+        T_WORLD_LIDARprev = T_WORLD_LIDAR;
+        continue;
+      }
+
+      // add to database if enough motion has occured
+      if (beam::PassedMotionThreshold(T_WORLD_LIDARprev, T_WORLD_LIDAR, 45.0,
+                                      2.0)) {
+        db_images.insert({stamp_map1, *buffer_image});
+        T_WORLD_LIDARprev = T_WORLD_LIDAR;
       }
     }
   }
 
+  /*******************************************************
+          Create Vocabulary and image database
+  *******************************************************/
   BEAM_INFO("Training vocabulary on map 1, numer of features: {}",
             features.size());
   DBoW3::Vocabulary map1_vocabulary(9, 3, DBoW3::TF_IDF, DBoW3::L1_NORM);
@@ -258,6 +252,8 @@ int main(int argc, char *argv[]) {
   /*************************************
                 Process bag 2
   **************************************/
+  double min_score = 1.0;
+  double max_score = 0.0;
   int idx = 0;
   BEAM_INFO("Processing {}", map2.bag_file);
   rosbag::Bag bag2;
@@ -279,66 +275,79 @@ int main(int argc, char *argv[]) {
     auto buffer_image = m.instantiate<sensor_msgs::Image>();
     if (buffer_image) {
       const auto stamp_map2 = buffer_image->header.stamp;
-      if (stamp_map2 - prev_frame_time >= ros::Duration(0.2)) {
-        prev_frame_time = stamp_map2;
-        cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
-        const auto results = image_db.QueryDatabase(image, 1);
-        // require matches
-        if (results.size() < 1) {
-          continue;
-        }
-        const auto score = results[0].Score;
-        if (!image_db.GetImageTimestamp(results[0].Id).has_value() ||
-            score < FLAGS_alpha) {
-          continue;
-        }
-        const auto stamp_map1 =
-            image_db.GetImageTimestamp(results[0].Id).value();
-        if (db_images.find(stamp_map1) == db_images.end()) {
-          continue;
-        }
-        cv::Mat map1_image =
-            beam_cv::OpenCVConversions::RosImgToMat(db_images.at(stamp_map1));
-
-        // match descriptors directly
-        std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map2;
-        std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map1;
-        beam_cv::DetectComputeAndMatch(image, map1_image, descriptor, detector,
-                                       matcher, pixels_map2, pixels_map1);
-        if (pixels_map1.size() < 7) {
-          continue;
-        }
-        // compute relative pose
-        auto T_map2_map1_offset =
-            beam_cv::RelativePoseEstimator::RANSACEstimator(
-                map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
-                beam_cv::EstimatorMethod::SEVENPOINT, 100, 10.0);
-        if (!T_map2_map1_offset.has_value()) {
-          continue;
-        }
-        const int num_inliers = beam_cv::CheckInliers(
-            map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
-            Eigen::Matrix4d::Identity(), T_map2_map1_offset.value(), 10.0);
-        const float inlier_ratio =
-            (float)num_inliers / (float)pixels_map1.size();
-        if (inlier_ratio < FLAGS_phi) {
-          continue;
-        }
-
-        cv::imwrite(output_folder + "/image_matches/map1/" +
-                        std::to_string(idx) + ".png",
-                    map1_image);
-        cv::imwrite(output_folder + "/image_matches/map2/" +
-                        std::to_string(idx) + ".png",
-                    image);
-        idx++;
-
-        // store candidate matches
-        matched_stamps.push_back({stamp_map2, stamp_map1});
-        match_scores.push_back(score);
+      // we process at a max of 5hz
+      if ((stamp_map2 - prev_frame_time).toSec() < 0.2) {
+        continue;
       }
+      prev_frame_time = stamp_map2;
+
+      // initial visual place recognition
+      cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
+      const auto results = image_db.QueryDatabase(image, 1);
+      if (results.size() < 1) {
+        continue;
+      }
+      const auto score = results[0].Score;
+      if (score > max_score)
+        max_score = score;
+      if (score < min_score)
+        min_score = score;
+
+      if (!image_db.GetImageTimestamp(results[0].Id).has_value() ||
+          score < FLAGS_alpha) {
+        continue;
+      }
+      const auto stamp_map1 = image_db.GetImageTimestamp(results[0].Id).value();
+      if (db_images.find(stamp_map1) == db_images.end()) {
+        continue;
+      }
+      cv::Mat map1_image =
+          beam_cv::OpenCVConversions::RosImgToMat(db_images.at(stamp_map1));
+
+      // match descriptors directly
+      std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map2;
+      std::vector<Eigen::Vector2i, beam::AlignVec2i> pixels_map1;
+      beam_cv::DetectComputeAndMatch(image, map1_image, descriptor, detector,
+                                     matcher, pixels_map2, pixels_map1);
+      if (pixels_map1.size() < 7) {
+        continue;
+      }
+      // compute relative pose
+      auto T_map2_map1_offset = beam_cv::RelativePoseEstimator::RANSACEstimator(
+          map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
+          beam_cv::EstimatorMethod::SEVENPOINT, 100, 10.0);
+      if (!T_map2_map1_offset.has_value()) {
+        continue;
+      }
+      const int num_inliers = beam_cv::CheckInliers(
+          map1.cam_model, map2.cam_model, pixels_map1, pixels_map2,
+          Eigen::Matrix4d::Identity(), T_map2_map1_offset.value(), 10.0);
+      const float inlier_ratio = (float)num_inliers / (float)pixels_map1.size();
+      if (inlier_ratio < FLAGS_phi) {
+        continue;
+      }
+
+      cv::imwrite(output_folder + "/image_matches/map1/" + std::to_string(idx) +
+                      ".png",
+                  map1_image);
+      cv::imwrite(output_folder + "/image_matches/map2/" + std::to_string(idx) +
+                      ".png",
+                  image);
+      idx++;
+
+      // store candidate matches
+      matched_stamps.push_back({stamp_map2, stamp_map1});
+      match_scores.push_back(score);
     }
   }
+
+  if (matched_stamps.empty()) {
+    throw std::runtime_error(
+        "No visual matches! Are these two maps of the same area?");
+  }
+
+  BEAM_INFO("Max visual place recognition score: {}", max_score);
+  BEAM_INFO("Min visual place recognition score: {}", min_score);
 
   /*************************************
          Get initial full maps
@@ -375,139 +384,117 @@ int main(int argc, char *argv[]) {
   auto map2_filtered = downsampler.GetFilteredCloud();
   beam::SavePointCloud(output_folder + "/map2.pcd", map2_filtered);
 
-  /*************************************
-         Filter candidate matches
-  **************************************/
+  /********************************************
+        Filter candidate matches with SC
+  *********************************************/
   beam_matching::GicpMatcher::Params matcher_params;
   matcher_params.max_iter = 50;
   beam_matching::GicpMatcher scan_registration(matcher_params);
   SCManager scan_context_extractor;
-
-  // lambda to get a scan as well as its N neighbours
-  auto get_neighbourhood_scan =
-      [&](auto pointclouds, const ros::Time timestamp,
-          const size_t radius) -> pcl::PointCloud<pcl::PointXYZI>::Ptr {
-    auto itlow = pointclouds.lower_bound(timestamp);
-    if (itlow == pointclouds.end() || itlow == pointclouds.begin()) {
-      return nullptr;
-    }
-    pcl::PointCloud<pcl::PointXYZI>::Ptr aggregate_scan(
-        new pcl::PointCloud<pcl::PointXYZI>);
-    *aggregate_scan += *pointclouds[itlow->first];
-
-    auto cur_prev = itlow, cur_next = itlow;
-    for (int i = 0; i < radius; i++) {
-      cur_prev = std::prev(cur_prev);
-      if (cur_prev != std::prev(pointclouds.begin())) {
-        if (pointclouds.find(cur_prev->first) != pointclouds.end()) {
-          *aggregate_scan += *pointclouds[cur_prev->first];
-        }
-      }
-      cur_next = std::next(cur_next);
-      if (cur_next != pointclouds.end()) {
-        if (pointclouds.find(cur_next->first) != pointclouds.end()) {
-          *aggregate_scan += *pointclouds[cur_next->first];
-        }
-      }
-    }
-    return aggregate_scan;
-  };
 
   std::map<ros::Time, Eigen::Matrix4d>
       relative_poses;                        // <map2 stamp: T_map1_map2>
   std::map<ros::Time, double> best_fitness;  // <map2 stamp : best fitness>
   std::map<ros::Time, ros::Time> best_match; // <map2 stamp : map1 stamp>
 
-  if (matched_stamps.empty()) {
-    std::cout << "No visual matches! Are these two maps of the same area?"
-              << std::endl;
-    throw std::runtime_error(
-        "No visual matches! Are these two maps of the same area?");
-  }
-
   BEAM_INFO("Filtering visual matches with Scancontext");
   std::cout << std::fixed;
-  // boost::progress_display pose_estimation_loading_bar(matched_stamps.size());
   size_t i = 0;
   for (const auto &[timestamp_map2, timestamp_map1] : matched_stamps) {
-    // ++pose_estimation_loading_bar;
     // get aggregate scans around target timestamp
     auto map1_scan =
-        get_neighbourhood_scan(map1.pointclouds, timestamp_map1, FLAGS_R);
+        GetNeighbourhoodScan(map1.pointclouds, timestamp_map1, FLAGS_R);
     auto map2_scan =
-        get_neighbourhood_scan(map2.pointclouds, timestamp_map2, FLAGS_R);
-    if (map1_scan && map2_scan) {
+        GetNeighbourhoodScan(map2.pointclouds, timestamp_map2, FLAGS_R);
+    if (map1_scan->empty() || map2_scan->empty()) {
+      std::cout << "Can't get aggregate scan" << std::endl;
+      continue;
+    }
 
-      // get poses of each lidar scan
-      Eigen::Matrix4d T_WORLD_LIDAR1, T_WORLD_LIDAR2;
-      if (!map1.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR1,
-                                                    timestamp_map1) ||
-          !map2.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR2,
-                                                    timestamp_map2)) {
-        continue;
+    // get poses of each lidar scan
+    Eigen::Matrix4d T_WORLD1_LIDAR, T_WORLD2_LIDAR;
+    if (!map1.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD1_LIDAR,
+                                                  timestamp_map1) ||
+        !map2.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD2_LIDAR,
+                                                  timestamp_map2)) {
+      continue;
+    }
+
+    // compute scan context distance
+    auto dist = ComputeSCDist(scan_context_extractor, *map1_scan,
+                              T_WORLD1_LIDAR, *map2_scan, T_WORLD2_LIDAR);
+    if (dist > FLAGS_psi) {
+      continue;
+    }
+
+    // compute initial relative pose between worlds
+    Eigen::Matrix4d T_WORLD1_WORLD2 =
+        T_WORLD1_LIDAR * beam::InvertTransform(T_WORLD2_LIDAR);
+
+    // attempt scan registration
+    pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1_init(
+        new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::transformPointCloud(*map2_scan, *map2_aligned_to_map1_init,
+                             T_WORLD1_WORLD2);
+
+    double fitness;
+    Eigen::Matrix4d T_map1_map2_refined;
+    bool converged =
+        RegisterScans(scan_registration, *map1_scan, *map2_aligned_to_map1_init,
+                      fitness, T_map1_map2_refined);
+    if (!converged) {
+      continue;
+    }
+
+    Eigen::Matrix4d T_map1_map2 = T_map1_map2_refined * T_WORLD1_WORLD2;
+
+    // check its fitness on a larger aggregate scan
+    auto map1_scan_l =
+        GetNeighbourhoodScan(map1.pointclouds, timestamp_map1, 2 * FLAGS_R);
+    auto map2_scan_l =
+        GetNeighbourhoodScan(map2.pointclouds, timestamp_map2, 2 * FLAGS_R);
+
+    if (map1_scan_l->empty() || map2_scan_l->empty()) {
+      std::cout << "Can't get larger aggregate scan" << std::endl;
+      continue;
+    }
+    pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1(
+        new pcl::PointCloud<pcl::PointXYZI>);
+    pcl::transformPointCloud(*map2_scan_l, *map2_aligned_to_map1, T_map1_map2);
+    double ransac_fitness =
+        beam::PointCloudError(*map1_scan_l, *map2_aligned_to_map1);
+    if (ransac_fitness > FLAGS_xi) {
+      continue;
+    }
+    // visualize scan registration
+    auto total_scan = CreateScanRegistrationCloud(*map1_scan_l, *map2_scan_l,
+                                                  *map2_aligned_to_map1);
+    beam::SavePointCloud(output_folder + "/cloud_matches/" +
+                             std::to_string(timestamp_map1.toNSec()) + "_" +
+                             std::to_string(timestamp_map2.toNSec()) + ".pcd",
+                         *total_scan);
+
+    // log results
+    std::cout << timestamp_map1 << " : " << timestamp_map2 << std::endl;
+    std::cout << "Pose: \n" << T_map1_map2 << std::endl;
+    std::cout << "Fitness: " << fitness << std::endl;
+    std::cout << "RANSAC Fitness: " << ransac_fitness << std::endl;
+    std::cout << "SC Dist: " << dist << std::endl;
+    std::cout << "DBoW score: " << match_scores[i] << std::endl;
+    std::cout << std::endl;
+    i++;
+
+    // update best result
+    if (relative_poses.find(timestamp_map2) != relative_poses.end()) {
+      if (best_fitness[timestamp_map2] > ransac_fitness) {
+        relative_poses[timestamp_map2] = T_map1_map2;
+        best_fitness[timestamp_map2] = ransac_fitness;
+        best_match[timestamp_map2] = timestamp_map1;
       }
-
-      // compute scan context distance
-      auto dist = ComputeSCDist(scan_context_extractor, *map1_scan,
-                                T_WORLD_LIDAR1, *map2_scan, T_WORLD_LIDAR2);
-      if (dist > FLAGS_psi) {
-        continue;
-      }
-
-      // attempt scan registration
-      double fitness;
-      Eigen::Matrix4d T_map1_map2;
-      bool converged = RegisterScans(scan_registration, *map1_scan, *map2_scan,
-                                     fitness, T_map1_map2);
-      if (fitness > FLAGS_xi || !converged) {
-        continue;
-      }
-
-      // check its fitness on a larger aggregate scan
-      auto map1_scan_l =
-          get_neighbourhood_scan(map1.pointclouds, timestamp_map1, 2 * FLAGS_R);
-      auto map2_scan_l =
-          get_neighbourhood_scan(map2.pointclouds, timestamp_map2, 2 * FLAGS_R);
-
-      if (!map1_scan_l->empty() && !map2_scan_l->empty()) {
-        pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1(
-            new pcl::PointCloud<pcl::PointXYZI>);
-        pcl::transformPointCloud(*map2_scan_l, *map2_aligned_to_map1,
-                                 T_map1_map2);
-        double ransac_fitness =
-            beam::PointCloudError(*map1_scan_l, *map2_aligned_to_map1);
-        // visualize scan registration
-        auto total_scan = CreateScanRegistrationCloud(
-            *map1_scan_l, *map2_scan_l, *map2_aligned_to_map1);
-        beam::SavePointCloud(output_folder + "/cloud_matches/" +
-                                 std::to_string(timestamp_map1.toNSec()) + "_" +
-                                 std::to_string(timestamp_map2.toNSec()) +
-                                 ".pcd",
-                             *total_scan);
-
-        // log results
-        std::cout << timestamp_map1 << " : " << timestamp_map2 << std::endl;
-        std::cout << "Pose: \n" << T_map1_map2 << std::endl;
-        std::cout << "Fitness: " << fitness << std::endl;
-        std::cout << "RANSAC Fitness: " << ransac_fitness << std::endl;
-        std::cout << "SC Dist: " << dist << std::endl;
-        std::cout << "DBoW score: " << match_scores[i] << std::endl;
-        std::cout << std::endl;
-        i++;
-
-        // update best result
-        if (relative_poses.find(timestamp_map2) != relative_poses.end()) {
-          if (best_fitness[timestamp_map2] > ransac_fitness) {
-            relative_poses[timestamp_map2] = T_map1_map2;
-            best_fitness[timestamp_map2] = ransac_fitness;
-            best_match[timestamp_map2] = timestamp_map1;
-          }
-        } else {
-          relative_poses[timestamp_map2] = T_map1_map2;
-          best_fitness[timestamp_map2] = ransac_fitness;
-          best_match[timestamp_map2] = timestamp_map1;
-        }
-      }
+    } else {
+      relative_poses[timestamp_map2] = T_map1_map2;
+      best_fitness[timestamp_map2] = ransac_fitness;
+      best_match[timestamp_map2] = timestamp_map1;
     }
   }
 
@@ -603,10 +590,14 @@ int main(int argc, char *argv[]) {
             full_map_fitness);
 
   BEAM_INFO("Attempting full map GICP.");
-  scan_registration.SetRef(map1_full_cloud);
-  scan_registration.SetTarget(map2_full_cloud);
-  bool converged = scan_registration.Match();
-  auto scan_reg_result = scan_registration.GetResult();
+  beam_matching::GicpMatcher::Params matcher_params2;
+  matcher_params2.max_iter = 50;
+  matcher_params2.res = 0.3;
+  beam_matching::GicpMatcher scan_registration2(matcher_params2);
+  scan_registration2.SetRef(map1_full_cloud);
+  scan_registration2.SetTarget(map2_full_cloud);
+  bool converged = scan_registration2.Match();
+  auto scan_reg_result = scan_registration2.GetResult();
   Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
 
   pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
@@ -616,6 +607,8 @@ int main(int argc, char *argv[]) {
 
   double full_map_fitness_gicp =
       beam::PointCloudError(*map1_full_cloud, *map2_aligned_to_map1);
+
+  beam::SavePointCloud(output_folder + "/map2_gicp_aligned.pcd", *map2_aligned_to_map1);
 
   BEAM_INFO("Full map fitness score (GICP): {}", full_map_fitness_gicp);
 

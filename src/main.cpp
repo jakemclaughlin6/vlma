@@ -4,6 +4,7 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <vl_traj_alignment/pose_lookup.h>
 
+#include <beam_filtering/CropBox.h>
 #include <beam_filtering/VoxelDownsample.h>
 #include <beam_mapping/Poses.h>
 #include <beam_matching/GicpMatcher.h>
@@ -43,7 +44,7 @@ DEFINE_validator(map2_config_file, &beam::gflags::ValidateFileMustExist);
 DEFINE_bool(offset_map2, false,
             "Whether to offset the second map trajectory (for testing)");
 
-DEFINE_double(alpha, 0.5, "Minimum DBoW Similarity.");
+DEFINE_double(alpha, 0.4, "Minimum DBoW Similarity.");
 DEFINE_double(phi, 0.5, "Minimum visual inlier ratio.");
 DEFINE_double(psi, 0.15, "Maximum Scan Context distance.");
 DEFINE_double(xi, 0.5, "Maximum scan registration fitness between matches.");
@@ -52,6 +53,10 @@ DEFINE_int32(R, 18, "Point Cloud Aggregation radius.");
 std::string output_folder = beam::CombinePaths(
     FLAGS_output_root,
     beam::ConvertTimeToDate(std::chrono::system_clock::now()));
+
+beam_filtering::CropBox<pcl::PointXYZI>
+    cropper(Eigen::Vector3f(-1.0, -1.0, -1.0), Eigen::Vector3f(1.0, 1.0, 1.0),
+            Eigen::Affine3f(Eigen::Matrix4f::Identity()), false);
 
 namespace vl_traj_alignment {
 class Map {
@@ -109,13 +114,18 @@ public:
         new pcl::PointCloud<pcl::PointXYZI>);
     pcl::fromPCLPointCloud2(pcl_pc2, *scan_in_lidar_frame);
 
+    // remove points inside 2m box
+    cropper.SetInputCloud(scan_in_lidar_frame);
+    cropper.Filter();
+    auto filtered_cloud = cropper.GetFilteredCloud();
+
     // transform into world frame
     Eigen::Matrix4d T_WORLD_LIDAR;
     if (trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR,
                                             scan->header.stamp)) {
       pcl::PointCloud<pcl::PointXYZI>::Ptr scan_in_world_frame(
           new pcl::PointCloud<pcl::PointXYZI>);
-      pcl::transformPointCloud(*scan_in_lidar_frame, *scan_in_world_frame,
+      pcl::transformPointCloud(filtered_cloud, *scan_in_world_frame,
                                T_WORLD_LIDAR);
       // store
       pointclouds[scan->header.stamp] = scan_in_world_frame;
@@ -136,14 +146,6 @@ public:
 int main(int argc, char *argv[]) {
   // Load config file
   gflags::ParseCommandLineFlags(&argc, &argv, true);
-  if (!boost::filesystem::exists(FLAGS_map1_config_file)) {
-    BEAM_ERROR("Invalid Config File Path.");
-    return -1;
-  }
-  if (!boost::filesystem::exists(FLAGS_map2_config_file)) {
-    BEAM_ERROR("Invalid Config File Path.");
-    return -1;
-  }
 
   SetupOutputFolders(output_folder);
 
@@ -283,7 +285,7 @@ int main(int argc, char *argv[]) {
 
       // initial visual place recognition
       cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
-      const auto results = image_db.QueryDatabase(image, 1);
+      const auto results = image_db.QueryDatabaseWtihImage(image, 1);
       if (results.size() < 1) {
         continue;
       }
@@ -376,13 +378,15 @@ int main(int argc, char *argv[]) {
   downsampler.SetInputCloud(map1_full_cloud);
   downsampler.Filter();
   auto map1_filtered = downsampler.GetFilteredCloud();
-  beam::SavePointCloud(output_folder + "/map1.pcd", map1_filtered);
+  beam::SavePointCloud(output_folder + "/map1_filtered.pcd", map1_filtered);
+  beam::SavePointCloud(output_folder + "/map1.pcd", *map1_full_cloud);
 
   BEAM_INFO("Filtering map 2");
   downsampler.SetInputCloud(map2_full_cloud);
   downsampler.Filter();
   auto map2_filtered = downsampler.GetFilteredCloud();
-  beam::SavePointCloud(output_folder + "/map2.pcd", map2_filtered);
+  beam::SavePointCloud(output_folder + "/map2_filtered.pcd", map2_filtered);
+  beam::SavePointCloud(output_folder + "/map2.pcd", *map2_full_cloud);
 
   /********************************************
         Filter candidate matches with SC
@@ -578,8 +582,10 @@ int main(int argc, char *argv[]) {
   downsampler.SetInputCloud(map2_full_cloud_aligned);
   downsampler.Filter();
   auto map2_aligned_filtered = downsampler.GetFilteredCloud();
-  beam::SavePointCloud(output_folder + "/map2_aligned.pcd",
+  beam::SavePointCloud(output_folder + "/map2_aligned_filtered.pcd",
                        map2_aligned_filtered);
+  beam::SavePointCloud(output_folder + "/map2_aligned.pcd",
+                       *map2_full_cloud_aligned);
 
   /*********************************************
                   Final analytics
@@ -608,7 +614,8 @@ int main(int argc, char *argv[]) {
   double full_map_fitness_gicp =
       beam::PointCloudError(*map1_full_cloud, *map2_aligned_to_map1);
 
-  beam::SavePointCloud(output_folder + "/map2_gicp_aligned.pcd", *map2_aligned_to_map1);
+  beam::SavePointCloud(output_folder + "/map2_gicp_aligned.pcd",
+                       *map2_aligned_to_map1);
 
   BEAM_INFO("Full map fitness score (GICP): {}", full_map_fitness_gicp);
 

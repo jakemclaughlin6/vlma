@@ -1,4 +1,4 @@
-#include <vl_traj_alignment/scancontext/Scancontext.h>
+#include <vlma/scancontext/Scancontext.h>
 
 // namespace SC2
 // {

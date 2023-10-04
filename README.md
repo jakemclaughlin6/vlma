@@ -1,4 +1,4 @@
-# vl_traj_alignment
+# vlma
 
 ## Description:
 

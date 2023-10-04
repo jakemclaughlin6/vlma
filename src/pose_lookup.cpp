@@ -1,8 +1,8 @@
-#include <vl_traj_alignment/pose_lookup.h>
+#include <vlma/pose_lookup.h>
 #include <beam_utils/log.h>
 #include <geometry_msgs/TransformStamped.h>
 
-namespace vl_traj_alignment
+namespace vlma
 {
 
   PoseLookup::PoseLookup(const beam_mapping::Poses &poses,

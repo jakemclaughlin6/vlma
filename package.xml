@@ -1,6 +1,6 @@
 <?xml version="1.0"?>
 <package format="2">
-  <name>vl_traj_alignment</name>
+  <name>vlma</name>
   <version>0.1.0</version>
   <description>Tools for testing visual-lidar constraints</description>
 

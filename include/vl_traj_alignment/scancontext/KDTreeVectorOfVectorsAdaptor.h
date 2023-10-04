@@ -28,7 +28,7 @@
 
 #pragma once
 
-#include <vl_traj_alignment/scancontext/nanoflann.hpp>
+#include <vlma/scancontext/nanoflann.hpp>
 
 #include <vector>
 

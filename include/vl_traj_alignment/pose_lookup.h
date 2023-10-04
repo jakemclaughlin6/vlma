@@ -4,7 +4,7 @@
 #include <beam_mapping/Poses.h>
 #include <tf2/buffer_core.h>
 
-namespace vl_traj_alignment {
+namespace vlma {
 /**
  * @brief This class can be used to estimate the pose of any frame given its
  * timestamp and a tf2::BufferCore which contains the poses.
@@ -40,4 +40,4 @@ private:
   std::string moving_frame_;
   std::string world_frame_;
 };
-} // namespace vl_traj_alignment
+} // namespace vlma

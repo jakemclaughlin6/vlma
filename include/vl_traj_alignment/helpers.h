@@ -4,7 +4,7 @@
 #include <rosbag/view.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/PointCloud2.h>
-#include <vl_traj_alignment/pose_lookup.h>
+#include <vlma/pose_lookup.h>
 
 #include <beam_filtering/VoxelDownsample.h>
 #include <beam_mapping/Poses.h>
@@ -24,7 +24,7 @@
 #include <beam_cv/trackers/Trackers.h>
 #include <opencv2/core/eigen.hpp>
 
-#include <vl_traj_alignment/scancontext/Scancontext.h>
+#include <vlma/scancontext/Scancontext.h>
 
 void SetupOutputFolders(const std::string &output_folder) {
   // setup output folder

@@ -2,7 +2,7 @@
 #include <rosbag/view.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/PointCloud2.h>
-#include <vl_traj_alignment/pose_lookup.h>
+#include <vlma/pose_lookup.h>
 
 #include <beam_filtering/CropBox.h>
 #include <beam_filtering/VoxelDownsample.h>
@@ -23,13 +23,13 @@
 #include <beam_cv/trackers/Trackers.h>
 #include <opencv2/core/eigen.hpp>
 
-#include <vl_traj_alignment/helpers.h>
-#include <vl_traj_alignment/scancontext/Scancontext.h>
+#include <vlma/helpers.h>
+#include <vlma/scancontext/Scancontext.h>
 
 #include <boost/progress.hpp>
 #include <gflags/gflags.h>
 
-DEFINE_string(output_root, "/home/jake/results/vl_traj_alignment/",
+DEFINE_string(output_root, "/home/jake/results/vlma/",
               "Full path to output folder.");
 DEFINE_validator(output_root, &beam::gflags::ValidateDirMustExist);
 
@@ -58,7 +58,7 @@ beam_filtering::CropBox<pcl::PointXYZI>
     cropper(Eigen::Vector3f(-1.0, -1.0, -1.0), Eigen::Vector3f(1.0, 1.0, 1.0),
             Eigen::Affine3f(Eigen::Matrix4f::Identity()), false);
 
-namespace vl_traj_alignment {
+namespace vlma {
 class Map {
 public:
   Map(const std::string &json_path, bool offset_poses,
@@ -99,7 +99,7 @@ public:
     map_num++;
 
     std::string lidar_frame = J_map["lidar_frame_id"];
-    vl_traj_alignment::PoseLookup traj_lookup_tmp(trajectory, lidar_frame,
+    vlma::PoseLookup traj_lookup_tmp(trajectory, lidar_frame,
                                                   world_frame);
     trajectory_lookup = traj_lookup_tmp;
     topics.push_back(J_map["image_topic"]);
@@ -133,7 +133,7 @@ public:
     return;
   }
 
-  vl_traj_alignment::PoseLookup trajectory_lookup;
+  vlma::PoseLookup trajectory_lookup;
   beam_mapping::Poses trajectory;
   std::string trajectory_file;
   std::shared_ptr<beam_calibration::CameraModel> cam_model;
@@ -141,7 +141,7 @@ public:
   std::string bag_file;
   std::vector<std::string> topics;
 };
-} // namespace vl_traj_alignment
+} // namespace vlma
 
 int main(int argc, char *argv[]) {
   // Load config file
@@ -150,8 +150,8 @@ int main(int argc, char *argv[]) {
   SetupOutputFolders(output_folder);
 
   // load each map object
-  vl_traj_alignment::Map map1(FLAGS_map1_config_file, false, "world");
-  vl_traj_alignment::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2,
+  vlma::Map map1(FLAGS_map1_config_file, false, "world");
+  vlma::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2,
                               "world");
 
   // storage variables

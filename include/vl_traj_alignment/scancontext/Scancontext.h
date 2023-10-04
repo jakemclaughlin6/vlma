@@ -22,10 +22,10 @@
 #include <pcl/filters/voxel_grid.h>
 #include <pcl_conversions/pcl_conversions.h>
 
-#include <vl_traj_alignment/scancontext/nanoflann.hpp>
-#include <vl_traj_alignment/scancontext/KDTreeVectorOfVectorsAdaptor.h>
+#include <vlma/scancontext/nanoflann.hpp>
+#include <vlma/scancontext/KDTreeVectorOfVectorsAdaptor.h>
 
-#include <vl_traj_alignment/scancontext/tictoc.h>
+#include <vlma/scancontext/tictoc.h>
 
 using namespace Eigen;
 using namespace nanoflann;

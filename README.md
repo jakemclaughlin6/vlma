@@ -1,11 +1,11 @@
-# vlma
+# vlma: Visual Lidar Map Alignment
 
 [![ROS](https://img.shields.io/badge/ROS-noetic-blue)](https://github.com/BEAMRobotics/beam_slam)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-20.04-purple)](https://github.com/BEAMRobotics/beam_slam)
 
 ## Description:
 
-This repository implements automatic trajectory alignment using visual and lidar topics from ros bags. The only inputs are 2 trajectory files computed from any SLAM package of choice, and the associated bags with their visual and lidar topics. The output will be the trajectory of the second map aligned to the first.
+This repository implements automatic map alignment using visual and lidar topics from ros bags. The only inputs are 2 trajectory files computed from any SLAM package of choice, and the associated bags with their visual and lidar topics. The output will be the trajectory of the second map aligned to the first.
 
 ## Dependencies:
 

@@ -99,8 +99,7 @@ public:
     map_num++;
 
     std::string lidar_frame = J_map["lidar_frame_id"];
-    vlma::PoseLookup traj_lookup_tmp(trajectory, lidar_frame,
-                                                  world_frame);
+    vlma::PoseLookup traj_lookup_tmp(trajectory, lidar_frame, world_frame);
     trajectory_lookup = traj_lookup_tmp;
     topics.push_back(J_map["image_topic"]);
     topics.push_back(J_map["lidar_topic"]);
@@ -151,8 +150,7 @@ int main(int argc, char *argv[]) {
 
   // load each map object
   vlma::Map map1(FLAGS_map1_config_file, false, "world");
-  vlma::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2,
-                              "world");
+  vlma::Map map2(FLAGS_map2_config_file, FLAGS_offset_map2, "world");
 
   // storage variables
   std::vector<std::pair<ros::Time, ros::Time>>
@@ -285,7 +283,7 @@ int main(int argc, char *argv[]) {
 
       // initial visual place recognition
       cv::Mat image = beam_cv::OpenCVConversions::RosImgToMat(*buffer_image);
-      const auto results = image_db.QueryDatabaseWtihImage(image, 1);
+      const auto results = image_db.QueryDatabaseWithImage(image, 1);
       if (results.size() < 1) {
         continue;
       }

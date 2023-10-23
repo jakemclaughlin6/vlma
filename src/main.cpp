@@ -8,6 +8,7 @@
 #include <beam_filtering/VoxelDownsample.h>
 #include <beam_mapping/Poses.h>
 #include <beam_matching/GicpMatcher.h>
+#include <beam_matching/Scancontext.h>
 #include <beam_utils/utils.h>
 #include <pcl/common/centroid.h>
 
@@ -24,7 +25,6 @@
 #include <opencv2/core/eigen.hpp>
 
 #include <vlma/helpers.h>
-#include <vlma/scancontext/Scancontext.h>
 
 #include <boost/progress.hpp>
 #include <gflags/gflags.h>

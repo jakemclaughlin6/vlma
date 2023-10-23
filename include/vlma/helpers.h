@@ -24,7 +24,7 @@
 #include <beam_cv/trackers/Trackers.h>
 #include <opencv2/core/eigen.hpp>
 
-#include <vlma/scancontext/Scancontext.h>
+#include <beam_matching/Scancontext.h>
 
 void SetupOutputFolders(const std::string &output_folder) {
   // setup output folder

@@ -41,13 +41,19 @@ DEFINE_string(map2_config_file, "",
               "Full path to config file to load (Required).");
 DEFINE_validator(map2_config_file, &beam::gflags::ValidateFileMustExist);
 
-DEFINE_bool(offset_map2, false,
+DEFINE_bool(offset_map2, true,
             "Whether to offset the second map trajectory (for testing)");
 
-DEFINE_double(alpha, 0.4, "Minimum DBoW Similarity.");
+DEFINE_bool(output_scans, false,
+            "Whether to output lidar scan registration visualization.");
+
+DEFINE_bool(filter_path_outliers, true,
+            "Whether to filter outliers from the relative trajectory.");
+
+DEFINE_double(alpha, 0.33, "Minimum DBoW Similarity.");
 DEFINE_double(phi, 0.5, "Minimum visual inlier ratio.");
 DEFINE_double(psi, 0.15, "Maximum Scan Context distance.");
-DEFINE_double(xi, 0.5, "Maximum scan registration fitness between matches.");
+DEFINE_double(xi, 1.0, "Maximum scan registration fitness between matches.");
 DEFINE_int32(R, 18, "Point Cloud Aggregation radius.");
 
 std::string output_folder = beam::CombinePaths(
@@ -67,15 +73,18 @@ public:
     nlohmann::json J_map;
     beam::ReadJson(json_path, J_map);
 
+    // load camera model and generate rectified model
     bag_file = J_map["bag_file"];
     std::string cam_file = J_map["camera_intrinsics_file"];
     cam_model = beam_calibration::CameraModel::Create(cam_file);
+
+    // load slam trajectory
     trajectory_file = J_map["trajectory_file"];
     trajectory.LoadFromJSON(trajectory_file);
 
     // offset the trajectory if desired
     if (offset_poses) {
-      Eigen::Vector3d pert = beam::UniformRandomVector<3>(3.0, 7.0);
+      Eigen::Vector3d pert = beam::UniformRandomVector<3>(10.0, 15.0);
       pert.z() = 0.0;
       auto traj_poses = trajectory.GetPoses();
       std::vector<Eigen::Matrix4d, beam::AlignMat4d> new_poses;
@@ -391,11 +400,14 @@ int main(int argc, char *argv[]) {
   *********************************************/
   beam_matching::GicpMatcher::Params matcher_params;
   matcher_params.max_iter = 50;
+  matcher_params.res = 0.1;
   beam_matching::GicpMatcher scan_registration(matcher_params);
   SCManager scan_context_extractor;
 
   std::map<ros::Time, Eigen::Matrix4d>
-      relative_poses;                        // <map2 stamp: T_map1_map2>
+      best_relative_poses; // <map2 stamp: T_map1_map2>
+  std::map<ros::Time, Eigen::Matrix4d>
+      all_relative_poses;                    // <map2 stamp: T_map1_map2>
   std::map<ros::Time, double> best_fitness;  // <map2 stamp : best fitness>
   std::map<ros::Time, ros::Time> best_match; // <map2 stamp : map1 stamp>
 
@@ -408,8 +420,9 @@ int main(int argc, char *argv[]) {
         GetNeighbourhoodScan(map1.pointclouds, timestamp_map1, FLAGS_R);
     auto map2_scan =
         GetNeighbourhoodScan(map2.pointclouds, timestamp_map2, FLAGS_R);
-    if (map1_scan->empty() || map2_scan->empty()) {
-      std::cout << "Can't get aggregate scan" << std::endl;
+
+    if (!map1_scan || !map2_scan) {
+      BEAM_DEBUG("Can't get aggregate scan");
       continue;
     }
 
@@ -426,6 +439,7 @@ int main(int argc, char *argv[]) {
     auto dist = ComputeSCDist(scan_context_extractor, *map1_scan,
                               T_WORLD1_LIDAR, *map2_scan, T_WORLD2_LIDAR);
     if (dist > FLAGS_psi) {
+      BEAM_DEBUG("Failed SC thresh");
       continue;
     }
 
@@ -438,16 +452,15 @@ int main(int argc, char *argv[]) {
         new pcl::PointCloud<pcl::PointXYZI>);
     pcl::transformPointCloud(*map2_scan, *map2_aligned_to_map1_init,
                              T_WORLD1_WORLD2);
-
     double fitness;
     Eigen::Matrix4d T_map1_map2_refined;
     bool converged =
         RegisterScans(scan_registration, *map1_scan, *map2_aligned_to_map1_init,
                       fitness, T_map1_map2_refined);
     if (!converged) {
+      BEAM_DEBUG("Scan reg did not converge");
       continue;
     }
-
     Eigen::Matrix4d T_map1_map2 = T_map1_map2_refined * T_WORLD1_WORLD2;
 
     // check its fitness on a larger aggregate scan
@@ -455,9 +468,8 @@ int main(int argc, char *argv[]) {
         GetNeighbourhoodScan(map1.pointclouds, timestamp_map1, 2 * FLAGS_R);
     auto map2_scan_l =
         GetNeighbourhoodScan(map2.pointclouds, timestamp_map2, 2 * FLAGS_R);
-
-    if (map1_scan_l->empty() || map2_scan_l->empty()) {
-      std::cout << "Can't get larger aggregate scan" << std::endl;
+    if (!map1_scan_l || !map2_scan_l) {
+      BEAM_DEBUG("Can't get larger aggregate scan");
       continue;
     }
     pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1(
@@ -466,15 +478,19 @@ int main(int argc, char *argv[]) {
     double ransac_fitness =
         beam::PointCloudError(*map1_scan_l, *map2_aligned_to_map1);
     if (ransac_fitness > FLAGS_xi) {
+      std::cout << "Failed fitness thresh" << std::endl;
       continue;
     }
+
     // visualize scan registration
-    auto total_scan = CreateScanRegistrationCloud(*map1_scan_l, *map2_scan_l,
-                                                  *map2_aligned_to_map1);
-    beam::SavePointCloud(output_folder + "/cloud_matches/" +
-                             std::to_string(timestamp_map1.toNSec()) + "_" +
-                             std::to_string(timestamp_map2.toNSec()) + ".pcd",
-                         *total_scan);
+    if (FLAGS_output_scans) {
+      auto total_scan = CreateScanRegistrationCloud(*map1_scan_l, *map2_scan_l,
+                                                    *map2_aligned_to_map1);
+      beam::SavePointCloud(output_folder + "/cloud_matches/" +
+                               std::to_string(timestamp_map1.toNSec()) + "_" +
+                               std::to_string(timestamp_map2.toNSec()) + ".pcd",
+                           *total_scan);
+    }
 
     // log results
     std::cout << timestamp_map1 << " : " << timestamp_map2 << std::endl;
@@ -487,17 +503,51 @@ int main(int argc, char *argv[]) {
     i++;
 
     // update best result
-    if (relative_poses.find(timestamp_map2) != relative_poses.end()) {
+    if (best_relative_poses.find(timestamp_map2) != best_relative_poses.end()) {
       if (best_fitness[timestamp_map2] > ransac_fitness) {
-        relative_poses[timestamp_map2] = T_map1_map2;
+        best_relative_poses[timestamp_map2] = T_map1_map2;
         best_fitness[timestamp_map2] = ransac_fitness;
         best_match[timestamp_map2] = timestamp_map1;
       }
     } else {
-      relative_poses[timestamp_map2] = T_map1_map2;
-      best_fitness[timestamp_map2] = ransac_fitness;
-      best_match[timestamp_map2] = timestamp_map1;
+      best_relative_poses.insert({timestamp_map2, T_map1_map2});
+      best_fitness.insert({timestamp_map2, ransac_fitness});
+      best_match.insert({timestamp_map2, timestamp_map1});
     }
+    all_relative_poses.insert({timestamp_map2, T_map1_map2});
+  }
+
+  if (best_relative_poses.empty()) {
+    BEAM_ERROR("No relative poses estimated");
+    return 1;
+  }
+
+  if (best_relative_poses.size() < 3) {
+    // stretch out the estimates at the end and start
+    const auto [start_stamp, start_pose] = *best_relative_poses.begin();
+    const auto [end_stamp, end_pose] = *best_relative_poses.rbegin();
+    best_relative_poses.insert({start_stamp - ros::Duration(1e-1), start_pose});
+    best_relative_poses.insert({end_stamp + ros::Duration(1e-1), end_pose});
+  }
+
+  /*************************************
+      Filter outlier relative poses
+  **************************************/
+  if (FLAGS_filter_path_outliers) {
+    BEAM_INFO("Estimating average transform.");
+    std::vector<Eigen::Matrix4d, beam::AlignMat4d> transforms;
+    for (const auto &[stamp, pose] : all_relative_poses) {
+      transforms.push_back(pose);
+    }
+    Eigen::Matrix4d avg_transform = beam::AverageTransforms(transforms);
+    std::map<ros::Time, Eigen::Matrix4d> filtered_best_relative_poses;
+    for (const auto &[stamp, pose] : best_relative_poses) {
+      if (beam::PassedMotionThreshold(pose, avg_transform, 10.0, 5.0)) {
+        continue;
+      }
+      filtered_best_relative_poses[stamp] = pose;
+    }
+    best_relative_poses = filtered_best_relative_poses;
   }
 
   /*************************************
@@ -506,7 +556,7 @@ int main(int argc, char *argv[]) {
   BEAM_INFO("Estimating spline for relative trajectory.");
   // create spline for relative estimates to smooth it
   std::vector<beam::Pose> relative_trajectory;
-  for (const auto &[stamp, T_FIXED_MOVING] : relative_poses) {
+  for (const auto &[stamp, T_FIXED_MOVING] : best_relative_poses) {
     beam::Pose pose{T_FIXED_MOVING, stamp.toNSec()};
     relative_trajectory.push_back(pose);
   }
@@ -593,29 +643,49 @@ int main(int argc, char *argv[]) {
   BEAM_INFO("Full map fitness Score (Non-Rigid Alignment): {}",
             full_map_fitness);
 
-  BEAM_INFO("Attempting full map GICP.");
-  beam_matching::GicpMatcher::Params matcher_params2;
-  matcher_params2.max_iter = 50;
-  matcher_params2.res = 0.3;
-  beam_matching::GicpMatcher scan_registration2(matcher_params2);
-  scan_registration2.SetRef(map1_full_cloud);
-  scan_registration2.SetTarget(map2_full_cloud);
-  bool converged = scan_registration2.Match();
-  auto scan_reg_result = scan_registration2.GetResult();
-  Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
-
-  pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
+  pcl::PointCloud<pcl::PointXYZ>::Ptr merged_maps_nonrigid(
       new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::transformPointCloud(*map2_full_cloud, *map2_aligned_to_map1,
-                           T_map1_map2);
+  *merged_maps_nonrigid += *map2_full_cloud_aligned;
+  *merged_maps_nonrigid += *map1_full_cloud;
+  beam::SavePointCloud(output_folder + "/merged_maps_nonrigid.pcd",
+                       *merged_maps_nonrigid);
 
-  double full_map_fitness_gicp =
-      beam::PointCloudError(*map1_full_cloud, *map2_aligned_to_map1);
+  beam_matching::GicpMatcher::Params new_matcher_params;
+  new_matcher_params.max_iter = 50;
+  new_matcher_params.res = 0.3;
+  beam_matching::GicpMatcher scan_registration2(new_matcher_params);
 
-  beam::SavePointCloud(output_folder + "/map2_gicp_aligned.pcd",
-                       *map2_aligned_to_map1);
+  BEAM_INFO("Attempting full map GICP.");
+  {
+    scan_registration2.SetRef(map1_full_cloud);
+    scan_registration2.SetTarget(map2_full_cloud);
+    bool converged = scan_registration2.Match();
+    auto scan_reg_result = scan_registration2.GetResult();
+    Eigen::Matrix4d T_map1_map2 = scan_reg_result.inverse().matrix();
 
-  BEAM_INFO("Full map fitness score (GICP): {}", full_map_fitness_gicp);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr map2_aligned_to_map1(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::transformPointCloud(*map2_full_cloud, *map2_aligned_to_map1,
+                             T_map1_map2);
+
+    double full_map_fitness_gicp =
+        beam::PointCloudError(*map1_full_cloud, *map2_aligned_to_map1);
+
+    downsampler.SetInputCloud(map2_aligned_to_map1);
+    downsampler.Filter();
+    auto map2_aligned_to_map1_filtered = downsampler.GetFilteredCloud();
+    beam::SavePointCloud(output_folder + "/map2_gicp_aligned.pcd",
+                         map2_aligned_to_map1_filtered);
+
+    BEAM_INFO("Full map fitness score (GICP): {}", full_map_fitness_gicp);
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr merged_maps_gicp(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    *merged_maps_gicp += *map2_aligned_to_map1;
+    *merged_maps_gicp += *map1_full_cloud;
+    beam::SavePointCloud(output_folder + "/merged_maps_gicp.pcd",
+                         *merged_maps_gicp);
+  }
 
   return 0;
 }

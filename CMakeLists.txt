@@ -173,3 +173,18 @@ target_link_libraries(${PROJECT_NAME}_highlight_changes
   ${PROJECT_NAME}
   ${catkin_LIBRARIES}
 )
+
+add_executable(${PROJECT_NAME}_average_roughness
+	src/average_roughness.cpp
+)
+add_dependencies(${PROJECT_NAME}_average_roughness
+  ${catkin_EXPORTED_TARGETS}
+)
+target_include_directories(${PROJECT_NAME}_average_roughness
+  PUBLIC
+    ${PROJECT_NAME}
+)
+target_link_libraries(${PROJECT_NAME}_average_roughness
+  ${PROJECT_NAME}
+  ${catkin_LIBRARIES}
+)

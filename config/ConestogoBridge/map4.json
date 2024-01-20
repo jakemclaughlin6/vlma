@@ -1,0 +1,8 @@
+{
+  "bag_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_33_53_ConestogoBridge/processed.bag",
+  "trajectory_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_33_53_ConestogoBridge/poses.json",
+  "camera_intrinsics_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_33_53_ConestogoBridge/F1.json",
+  "lidar_frame_id": "lidar_h_link",
+  "image_topic": "/F1/image_raw_resized",
+  "lidar_topic": "/lidar_h/velodyne_points"
+}

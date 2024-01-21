@@ -4,6 +4,7 @@
 #include <rosbag/view.h>
 #include <sensor_msgs/Image.h>
 #include <sensor_msgs/PointCloud2.h>
+#include <vlma/map.h>
 #include <vlma/pose_lookup.h>
 
 #include <beam_filtering/VoxelDownsample.h>

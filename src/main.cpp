@@ -50,7 +50,7 @@ DEFINE_bool(output_scans, false,
 DEFINE_bool(filter_path_outliers, true,
             "Whether to filter outliers from the relative trajectory.");
 
-DEFINE_double(alpha, 0.33, "Minimum DBoW Similarity.");
+DEFINE_double(alpha, 0.4, "Minimum DBoW Similarity.");
 DEFINE_double(phi, 0.5, "Minimum visual inlier ratio.");
 DEFINE_double(psi, 0.15, "Maximum Scan Context distance.");
 DEFINE_double(xi, 1.0, "Maximum scan registration fitness between matches.");
@@ -400,7 +400,7 @@ int main(int argc, char *argv[]) {
   *********************************************/
   beam_matching::GicpMatcher::Params matcher_params;
   matcher_params.max_iter = 50;
-  matcher_params.res = 0.1;
+  matcher_params.res = 0.15;
   beam_matching::GicpMatcher scan_registration(matcher_params);
   SCManager scan_context_extractor;
 
@@ -422,7 +422,7 @@ int main(int argc, char *argv[]) {
         GetNeighbourhoodScan(map2.pointclouds, timestamp_map2, FLAGS_R);
 
     if (!map1_scan || !map2_scan) {
-      BEAM_DEBUG("Can't get aggregate scan");
+      BEAM_WARN("Can't get aggregate scan");
       continue;
     }
 
@@ -439,7 +439,7 @@ int main(int argc, char *argv[]) {
     auto dist = ComputeSCDist(scan_context_extractor, *map1_scan,
                               T_WORLD1_LIDAR, *map2_scan, T_WORLD2_LIDAR);
     if (dist > FLAGS_psi) {
-      BEAM_DEBUG("Failed SC thresh");
+      BEAM_WARN("Failed SC thresh");
       continue;
     }
 
@@ -458,7 +458,7 @@ int main(int argc, char *argv[]) {
         RegisterScans(scan_registration, *map1_scan, *map2_aligned_to_map1_init,
                       fitness, T_map1_map2_refined);
     if (!converged) {
-      BEAM_DEBUG("Scan reg did not converge");
+      BEAM_WARN("Scan reg did not converge");
       continue;
     }
     Eigen::Matrix4d T_map1_map2 = T_map1_map2_refined * T_WORLD1_WORLD2;
@@ -469,7 +469,7 @@ int main(int argc, char *argv[]) {
     auto map2_scan_l =
         GetNeighbourhoodScan(map2.pointclouds, timestamp_map2, 2 * FLAGS_R);
     if (!map1_scan_l || !map2_scan_l) {
-      BEAM_DEBUG("Can't get larger aggregate scan");
+      BEAM_WARN("Can't get larger aggregate scan");
       continue;
     }
     pcl::PointCloud<pcl::PointXYZI>::Ptr map2_aligned_to_map1(
@@ -478,7 +478,7 @@ int main(int argc, char *argv[]) {
     double ransac_fitness =
         beam::PointCloudError(*map1_scan_l, *map2_aligned_to_map1);
     if (ransac_fitness > FLAGS_xi) {
-      std::cout << "Failed fitness thresh" << std::endl;
+      BEAM_WARN("Failed fitness thresh");
       continue;
     }
 

@@ -3,6 +3,6 @@
   "trajectory_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_28_24_ConestogoBridge/poses.json",
   "camera_intrinsics_file": "/home/jake/data/ConestogoBridge/2021_10_27_16_28_24_ConestogoBridge/F1.json",
   "lidar_frame_id": "lidar_h_link",
-  "image_topic": "/F1/image_raw",
+  "image_topic": "/F1/image",
   "lidar_topic": "/lidar_h/velodyne_points"
 }

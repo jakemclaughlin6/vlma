@@ -50,6 +50,10 @@ DEFINE_bool(output_scans, false,
 DEFINE_bool(filter_path_outliers, true,
             "Whether to filter outliers from the relative trajectory.");
 
+DEFINE_bool(use_lpr, false, "whatev");
+DEFINE_bool(use_sac, true, "whatev");
+DEFINE_bool(use_nonrigid, true, "whatev");
+
 DEFINE_double(alpha, 0.4, "Minimum DBoW Similarity.");
 DEFINE_double(phi, 0.5, "Minimum visual inlier ratio.");
 DEFINE_double(psi, 0.15, "Maximum Scan Context distance.");
@@ -63,10 +67,6 @@ std::string output_folder = beam::CombinePaths(
 beam_filtering::CropBox<pcl::PointXYZI>
     cropper(Eigen::Vector3f(-1.0, -1.0, -1.0), Eigen::Vector3f(1.0, 1.0, 1.0),
             Eigen::Affine3f(Eigen::Matrix4f::Identity()), false);
-
-const bool USE_LPR = true;
-const bool USE_SAC = true;
-const bool USE_NONRIGID = true;
 
 namespace vlma {
 class Map {
@@ -171,6 +171,7 @@ int main(int argc, char *argv[]) {
   std::vector<double> match_scores;
   std::map<ros::Time, sensor_msgs::Image> db_images;
   SCManager scan_context_extractor;
+  scan_context_extractor.SC_DIST_THRES = FLAGS_psi;
   std::vector<ros::Time> sc_database_stamps;
 
   // visual feature detector, desciptor, matcher and tracker
@@ -305,7 +306,7 @@ int main(int argc, char *argv[]) {
     auto scan = m.instantiate<sensor_msgs::PointCloud2>();
     if (scan) {
       map2.AddPointCloud(scan);
-      if (USE_LPR) {
+      if (FLAGS_use_lpr) {
         pcl::PCLPointCloud2 pcl_pc2;
         beam::pcl_conversions::toPCL(*scan, pcl_pc2);
         pcl::PointCloud<pcl::PointXYZI>::Ptr scan_in_lidar_frame(
@@ -313,6 +314,9 @@ int main(int argc, char *argv[]) {
         pcl::fromPCLPointCloud2(pcl_pc2, *scan_in_lidar_frame);
         const auto [id, score] =
             scan_context_extractor.detectLoopClosureID(*scan_in_lidar_frame);
+        if (id < 0) {
+          continue;
+        }
         matched_stamps.push_back({scan->header.stamp, sc_database_stamps[id]});
         match_scores.push_back(score);
       }
@@ -323,7 +327,7 @@ int main(int argc, char *argv[]) {
     // query image database to get initial matches
     auto buffer_image = m.instantiate<sensor_msgs::Image>();
     if (buffer_image) {
-      if (USE_LPR) {
+      if (FLAGS_use_lpr) {
         continue;
       }
       const auto stamp_map2 = buffer_image->header.stamp;
@@ -466,6 +470,7 @@ int main(int argc, char *argv[]) {
 
     if (!map1_scan || !map2_scan) {
       BEAM_WARN("Can't get aggregate scan");
+      std::cout << timestamp_map2 << "  -  " << timestamp_map1 << std::endl;
       continue;
     }
 
@@ -507,7 +512,7 @@ int main(int argc, char *argv[]) {
     Eigen::Matrix4d T_map1_map2 = T_map1_map2_refined * T_WORLD1_WORLD2;
 
     // check its fitness on a larger aggregate scan
-    if (USE_SAC) {
+    if (FLAGS_use_sac) {
       auto map1_scan_l =
           GetNeighbourhoodScan(map1.pointclouds, timestamp_map1, 2 * FLAGS_R);
       auto map2_scan_l =
@@ -561,31 +566,46 @@ int main(int argc, char *argv[]) {
       best_fitness.insert({timestamp_map2, fitness});
       best_match.insert({timestamp_map2, timestamp_map1});
     }
-    all_match_scores.insert({timestamp_map2, match_scores[i]});
+
+    if (FLAGS_use_lpr) {
+      all_match_scores.insert({timestamp_map2, dist});
+    } else {
+      all_match_scores.insert({timestamp_map2, match_scores[i]});
+    }
     all_relative_poses.insert({timestamp_map2, T_map1_map2});
   }
 
   // if we don't want non-rigid alignment, we only use the best score (either
   // from dbow or sc depending on if we use lpr or not)
-  if (!USE_NONRIGID) {
+  if (!FLAGS_use_nonrigid) {
+    // std::map<ros::Time, Eigen::Matrix4d> best_relative_pose;
+    // if (FLAGS_use_lpr) {
+    //   float best_score = std::numeric_limits<double>::infinity();
+    //   for (const auto &[stamp, score] : all_match_scores) {
+    //     if (score < best_score) {
+    //       best_score = score;
+    //       best_relative_pose.clear();
+    //       best_relative_pose.insert({stamp, all_relative_poses[stamp]});
+    //     }
+    //   }
+    // } else {
+    //   float best_score = 0;
+    //   for (const auto &[stamp, score] : all_match_scores) {
+    //     if (score > best_score) {
+    //       best_score = score;
+    //       best_relative_pose.clear();
+    //       best_relative_pose.insert({stamp, all_relative_poses[stamp]});
+    //     }
+    //   }
+    // }
+    // best_relative_poses = best_relative_pose;
     std::map<ros::Time, Eigen::Matrix4d> best_relative_pose;
-    if (USE_LPR) {
-      float best_score = std::numeric_limits<double>::infinity();
-      for (const auto &[stamp, score] : all_match_scores) {
-        if (score < best_score) {
-          best_score = score;
-          best_relative_pose.clear();
-          best_relative_pose.insert({stamp, all_relative_poses[stamp]});
-        }
-      }
-    } else {
-      float best_score = 0;
-      for (const auto &[stamp, score] : all_match_scores) {
-        if (score > best_score) {
-          best_score = score;
-          best_relative_pose.clear();
-          best_relative_pose.insert({stamp, all_relative_poses[stamp]});
-        }
+    for (const auto &[stamp, pose] : best_relative_poses) {
+      float best_f = std::numeric_limits<double>::infinity();
+      if (best_fitness[stamp] < best_f) {
+        best_f = best_fitness[stamp];
+        best_relative_pose.clear();
+        best_relative_pose.insert({stamp, pose});
       }
     }
     best_relative_poses = best_relative_pose;
@@ -596,12 +616,15 @@ int main(int argc, char *argv[]) {
     return 1;
   }
 
-  if (best_relative_poses.size() < 3) {
+  if (best_relative_poses.size() < 4) {
+    std::cout << "Under 4 poses in spline" << std::endl;
     // stretch out the estimates at the end and start
     const auto [start_stamp, start_pose] = *best_relative_poses.begin();
     const auto [end_stamp, end_pose] = *best_relative_poses.rbegin();
+    best_relative_poses.insert({start_stamp - ros::Duration(2e-1), start_pose});
     best_relative_poses.insert({start_stamp - ros::Duration(1e-1), start_pose});
     best_relative_poses.insert({end_stamp + ros::Duration(1e-1), end_pose});
+    best_relative_poses.insert({end_stamp + ros::Duration(2e-1), end_pose});
   }
 
   /*************************************
@@ -699,6 +722,28 @@ int main(int argc, char *argv[]) {
 
     *map2_full_cloud_aligned += *aligned_cloud;
   }
+
+  pcl::PointCloud<pcl::PointXYZRGB> aligned_trajectory_cloud;
+  for (const auto &stamp : map2.trajectory.GetTimeStamps()) {
+    Eigen::Matrix4d T_WORLD_LIDAR;
+    if (!map2.trajectory_lookup.GetT_WORLD_SENSOR(T_WORLD_LIDAR, stamp)) {
+      continue;
+    }
+
+    Eigen::Matrix4d T_map1_map2;
+    if (!spline.get_pose(stamp.toSec(), T_map1_map2)) {
+      if (stamp.toNSec() < start_pose.timestampInNs) {
+        T_map1_map2 = start_pose.T_FIXED_MOVING;
+      } else if (stamp.toNSec() > end_pose.timestampInNs) {
+        T_map1_map2 = end_pose.T_FIXED_MOVING;
+      }
+    }
+    Eigen::Matrix4d T_new = T_map1_map2 * T_WORLD_LIDAR;
+    aligned_trajectory_cloud =
+        beam::AddFrameToCloud(aligned_trajectory_cloud, T_new);
+  }
+  beam::SavePointCloud(output_folder + "/map2_trajectory_aligned.pcd",
+                       aligned_trajectory_cloud);
 
   BEAM_INFO("Filtering aligned map 2");
   downsampler.SetInputCloud(map2_full_cloud_aligned);
